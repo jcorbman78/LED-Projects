@@ -1,0 +1,251 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <Adafruit_NeoPixel.h>
+#include <string> // Include string library
+
+#define LED_PIN 4
+#define LED_COUNT 144
+#define SCAN_TIME 60 // Increased scan time in seconds
+#define RETRY_DELAY 5000 // Delay in milliseconds before retrying connection
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+static BLEUUID serviceUUID("180D");
+static BLEUUID charUUID("2A37");
+
+static boolean doConnect = false;
+static boolean connected = false;
+static boolean doScan = true;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLERemoteService* pRemoteService;
+static BLEAddress* pServerAddress;
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    connected = true;
+    doScan = false;
+    Serial.println("Client Connected");
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    connected = false;
+    doScan = true;
+    Serial.println("Client Disconnected");
+  }
+};
+
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  if (length > 1) {
+    int heartRate = pData[1];
+    Serial.print("Heart Rate: ");
+    Serial.println(heartRate);
+    updateLEDs(heartRate);
+  } else {
+    Serial.println("Error: Heart rate data length is invalid.");
+  }
+}
+
+int getHeartRateZone(int heartRate) {
+  if (heartRate <= 108) return 1;
+  if (heartRate <= 134) return 2;
+  if (heartRate <= 146) return 3;
+  if (heartRate <= 154) return 4;
+  if (heartRate <= 162) return 5;
+  return 6;
+}
+
+uint32_t getZoneColor(int zone) {
+  switch (zone) {
+    case 1: return strip.Color(75 * 0.8, 0 * 0.8, 130 * 0.8);
+    case 2: return strip.Color(0 * 0.8, 0 * 0.8, 255 * 0.8);
+    case 3: return strip.Color(255 * 0.8, 255 * 0.8, 0 * 0.8);
+    case 4: return strip.Color(255 * 0.8, 165 * 0.8, 0 * 0.8);
+    case 5: return strip.Color(255 * 0.8, 0 * 0.8, 0 * 0.8);
+    case 6: return strip.Color(255 * 0.8, 192 * 0.8, 203 * 0.8);
+    default: return strip.Color(0, 0, 0);
+  }
+}
+
+uint32_t blendColors(uint32_t color1, uint32_t color2, float blendFactor) {
+  uint8_t r1 = (color1 >> 16) & 0xFF;
+  uint8_t g1 = (color1 >> 8) & 0xFF;
+  uint8_t b1 = color1 & 0xFF;
+
+  uint8_t r2 = (color2 >> 16) & 0xFF;
+  uint8_t g2 = (color2 >> 8) & 0xFF;
+  uint8_t b2 = color2 & 0xFF;
+
+  uint8_t blendedR = r1 + (r2 - r1) * blendFactor;
+  uint8_t blendedG = g1 + (g2 - g1) * blendFactor;
+  uint8_t blendedB = b1 + (b2 - b1) * blendFactor;
+
+  return strip.Color(blendedR, blendedG, blendedB);
+}
+
+void updateLEDs(int heartRate) {
+  int currentZone = getHeartRateZone(heartRate);
+  uint32_t currentColor = getZoneColor(currentZone);
+  int previousZone = getHeartRateZone(heartRate - 1);
+  uint32_t previousColor = getZoneColor(previousZone);
+
+  float blendFactor = 0.0;
+  if (currentZone != previousZone) {
+    int zoneLowerBound;
+    int zoneRange;
+
+    switch (currentZone) {
+      case 2:
+        zoneLowerBound = 134;
+        zoneRange = 12;
+        break;
+      case 3:
+        zoneLowerBound = 146;
+        zoneRange = 8;
+        break;
+      case 4:
+        zoneLowerBound = 154;
+        zoneRange = 8;
+        break;
+      case 5:
+        zoneLowerBound = 162;
+        zoneRange = 8;
+        break;
+      case 6:
+        zoneLowerBound = 163;
+        zoneRange = 100;
+        break;
+      default:
+        zoneLowerBound = 0;
+        zoneRange = 1;
+        break;
+    }
+
+    if (heartRate > zoneLowerBound) {
+      blendFactor = (float)(heartRate - zoneLowerBound) / zoneRange;
+    }
+  }
+
+  uint32_t blendedColor = blendColors(previousColor, currentColor, blendFactor);
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    if ((i + 1) % 3 != 0) {
+      strip.setPixelColor(i, blendedColor);
+    } else {
+      strip.setPixelColor(i, 0, 0, 0);
+    }
+  }
+  strip.show();
+}
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("BLE Advertised Device found: ");
+    Serial.println(advertisedDevice.toString().c_str());
+    Serial.print("RSSI: ");
+    Serial.println(advertisedDevice.getRSSI());
+
+    if (advertisedDevice.isAdvertisingService(serviceUUID)) { // Check for service UUID
+      Serial.print("Heart Rate Device found. address: ");
+      Serial.println(advertisedDevice.getAddress().toString().c_str());
+      advertisedDevice.getScan()->stop();
+      pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+      doConnect = true;
+    }
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.show();
+  BLEDevice::init("ESP32_HR_LED");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(SCAN_TIME); // Start scanning with increased time
+}
+
+void loop() {
+  unsigned long lastScanBlink = 0;
+  const long scanBlinkInterval = 500;
+
+  if (doConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+    Serial.println("Attempting to connect...");
+    delay(200);
+    if (pClient->connect(*pServerAddress)) {
+      delay(200);
+      Serial.println("Connected to server");
+      if (pClient->isConnected()) {
+        Serial.println("Client is connected.");
+        pRemoteService = pClient->getService(serviceUUID);
+        if (pRemoteService != nullptr) {
+          Serial.println("Service found");
+          pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+          if (pRemoteCharacteristic != nullptr) {
+            Serial.println("Characteristic found");
+            if (pRemoteCharacteristic->can
+notify()) {
+              Serial.println("Characteristic can notify");
+              pRemoteCharacteristic->registerForNotify(notifyCallback);
+              connected = true;
+              doConnect = false;
+            } else {
+              Serial.println("Error: Characteristic cannot notify");
+              pClient->disconnect();
+              doConnect = false;
+            }
+          } else {
+            Serial.println("Error: Characteristic not found");
+            pClient->disconnect();
+            doConnect = false;
+          }
+        } else {
+          Serial.println("Error: Service not found");
+          pClient->disconnect();
+          doConnect = false;
+        }
+      } else {
+        Serial.println("Error: Client is not connected after connect function");
+        pClient->disconnect();
+        doConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to server");
+      doConnect = false;
+    }
+    if (!connected) { // If connection failed, restart scan after delay
+      Serial.println("Connection failed. Restarting scan after delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+    }
+  }
+
+  if (connected) {
+    Serial.println("Reading Characteristic Value");
+    pRemoteCharacteristic->readValue();
+  } else if (doScan) {
+    if (millis() - lastScanBlink >= scanBlinkInterval) {
+      scanBlink();
+      lastScanBlink = millis();
+    }
+  }
+
+  delay(10);
+}
+
+void scanBlink() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 255);
+  }
+  strip.show();
+  delay(250);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
+  strip.show();
+  delay(250);
+}
