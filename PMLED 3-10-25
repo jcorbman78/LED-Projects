@@ -1,0 +1,127 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN 4
+#define LED_COUNT 144
+#define SCAN_TIME 60
+#define RETRY_DELAY 5000
+
+#define ZONE_1 1      // recovery watts - dark purple
+#define ZONE_2 125    // endurance - blue
+#define ZONE_3 160    // tempo - green
+#define ZONE_4 212    // threshold - yellow
+#define ZONE_5 273    // aerobic - orange
+#define ZONE_6 380    // nm - red
+#define ZONE_7 381    // above nm - pink
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+static BLEUUID serviceUUID("1818"); // Cycling Power Service UUID
+static BLEUUID charUUID("2A63");  // Cycling Power Measurement Characteristic UUID
+
+static boolean doConnect = false;
+static boolean connected = false;
+static boolean doScan = true;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLERemoteService* pRemoteService;
+static BLEAddress* pServerAddress;
+
+BLEAddress targetAddress("C9:35:6D:0D:51:03"); // Target Power Meter Address
+
+// ... (rest of the code as previously provided) ...
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.show();
+  BLEDevice::init("ESP32_Power_LED");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(SCAN_TIME);
+}
+
+void loop() {
+  unsigned long lastScanBlink = 0;
+  const long scanBlinkInterval = 500;
+
+  if (doConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+    Serial.println("Attempting to connect...");
+    delay(200);
+    if (pClient->connect(*pServerAddress)) {
+      delay(200);
+      Serial.println("Connected to server");
+      if (pClient->isConnected()) {
+        Serial.println("Client is connected.");
+        pRemoteService = pClient->getService(serviceUUID);
+        if (pRemoteService != nullptr) {
+          Serial.println("Service found");
+          pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+          if (pRemoteCharacteristic != nullptr) {
+            Serial.println("Characteristic found");
+            if (pRemoteCharacteristic->canNotify()) {
+              Serial.println("Characteristic can notify");
+              pRemoteCharacteristic->registerForNotify(notifyCallback);
+              connected = true;
+              doConnect = false;
+            } else {
+              Serial.println("Error: Characteristic cannot notify");
+              pClient->disconnect();
+              doConnect = false;
+            }
+          } else {
+            Serial.println("Error: Characteristic not found");
+            pClient->disconnect();
+            doConnect = false;
+          }
+        } else {
+          Serial.println("Error: Service not found");
+          pClient->disconnect();
+          doConnect = false;
+        }
+      } else {
+        Serial.println("Error: Client is not connected after connect function");
+        pClient->disconnect();
+        doConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to server");
+      doConnect = false;
+    }
+    if (!connected) {
+      Serial.println("Connection failed. Restarting scan after delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+    }
+  }
+
+  if (connected) {
+    Serial.println("Reading Characteristic Value");
+    pRemoteCharacteristic->readValue();
+  } else if (doScan) {
+    if (millis() - lastScanBlink >= scanBlinkInterval) {
+      scanBlink();
+      lastScanBlink = millis();
+    }
+  }
+
+  delay(10);
+}
+
+void scanBlink() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 255);
+  }
+  strip.show();
+  delay(250);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
+  strip.show();
+  delay(250);
+}
