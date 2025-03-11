@@ -8,7 +8,13 @@
 #define LED_COUNT 144
 #define SCAN_TIME 60
 #define RETRY_DELAY 5000
-#define PULSE_DURATION 200 // Duration of the pulse in milliseconds
+#define PULSE_FADE_IN_DURATION 150  // Quick fade-in (first pulse)
+#define PULSE_FADE_OUT_DURATION 450 // Slow fade-out (first pulse)
+#define PULSE_HOLD_DURATION 100     // Duration at full brightness (first pulse)
+#define PULSE_DELAY 150             // Delay between pulses
+#define PULSE_FADE_IN_DURATION_2 180 // Quick fade-in (second pulse)
+#define PULSE_FADE_OUT_DURATION_2 500 // Slow fade-out (second pulse)
+#define PULSE_HOLD_DURATION_2 120 // Duration at full brightness (second pulse)
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -70,22 +76,48 @@ uint32_t getZoneColor(int zone) {
   }
 }
 
+void fadeLEDs(uint32_t color, int fadeDuration, bool fadeIn) {
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+
+  int steps = 20; // Number of fade steps
+  float stepDelay = (float)fadeDuration / steps;
+
+  for (int step = 0; step <= steps; step++) {
+    float brightness = fadeIn ? (float)step / steps : 1.0 - (float)step / steps;
+    uint8_t fadedR = r * brightness;
+    uint8_t fadedG = g * brightness;
+    uint8_t fadedB = b * brightness;
+
+    for (int i = 0; i < LED_COUNT; i++) {
+      if ((i + 1) % 3 != 0) {
+        strip.setPixelColor(i, strip.Color(fadedR, fadedG, fadedB));
+      } else {
+        strip.setPixelColor(i, 0, 0, 0);
+      }
+    }
+    strip.show();
+    delay(stepDelay);
+  }
+}
+
 void pulseLEDs() {
   int zone = getHeartRateZone(currentHeartRate);
   uint32_t color = getZoneColor(zone);
-  for (int i = 0; i < LED_COUNT; i++) {
-    if ((i + 1) % 3 != 0) { // Check if the LED is not the third one
-      strip.setPixelColor(i, color);
-    } else {
-      strip.setPixelColor(i, 0, 0, 0); // Turn off every third LED
-    }
-  }
-  strip.show();
-  delay(PULSE_DURATION);
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, 0, 0, 0);
-  }
-  strip.show();
+
+  // First Pulse (Quick Fade In, Hold, Slow Fade Out)
+  fadeLEDs(color, PULSE_FADE_IN_DURATION, true);
+  delay(PULSE_HOLD_DURATION);
+  fadeLEDs(color, PULSE_FADE_OUT_DURATION, false);
+
+  // Delay Between Pulses
+  delay(PULSE_DELAY);
+
+  // Second Pulse (Quick Fade In, Longer Hold, Slower Fade Out)
+  fadeLEDs(color, PULSE_FADE_IN_DURATION_2, true);
+  delay(PULSE_HOLD_DURATION_2);
+  fadeLEDs(color, PULSE_FADE_OUT_DURATION_2, false);
 }
 
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
@@ -115,7 +147,6 @@ void setup() {
   pBLEScan->setActiveScan(true);
   pBLEScan->start(SCAN_TIME);
 }
-
 void loop() {
   unsigned long lastScanBlink = 0;
   const long scanBlinkInterval = 500;
@@ -123,19 +154,25 @@ void loop() {
   if (doConnect) {
     BLEClient* pClient = BLEDevice::createClient();
     pClient->setClientCallbacks(new MyClientCallback());
+
     Serial.println("Attempting to connect...");
     delay(200);
+
     if (pClient->connect(*pServerAddress)) {
-      delay(200);
       Serial.println("Connected to server");
+      delay(200);
+
       if (pClient->isConnected()) {
         Serial.println("Client is connected.");
         pRemoteService = pClient->getService(serviceUUID);
-        if (pRemoteService != nullptr) {
+
+        if (pRemoteService) {
           Serial.println("Service found");
           pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
-          if (pRemoteCharacteristic != nullptr) {
+
+          if (pRemoteCharacteristic) {
             Serial.println("Characteristic found");
+
             if (pRemoteCharacteristic->canNotify()) {
               Serial.println("Characteristic can notify");
               pRemoteCharacteristic->registerForNotify(notifyCallback);
@@ -181,17 +218,4 @@ void loop() {
   }
 
   delay(10);
-}
-
-void scanBlink() {
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, 0, 0, 255);
-  }
-  strip.show();
-  delay(250);
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, 0, 0, 0);
-  }
-  strip.show();
-  delay(250);
 }
