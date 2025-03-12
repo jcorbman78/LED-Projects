@@ -58,20 +58,22 @@ static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, ui
 }
 
 int getHeartRateZone(int heartRate) {
-  if (heartRate <= 100) return 1;
-  if (heartRate <= 130) return 2;
-  if (heartRate <= 150) return 3;
-  if (heartRate <= 170) return 4;
-  return 5;
+  if (heartRate <= 108) return 1;
+  if (heartRate <= 134) return 2;
+  if (heartRate <= 146) return 3;
+  if (heartRate <= 154) return 4;
+  if (heartRate <= 162) return 5;
+  return 6;
 }
 
 uint32_t getZoneColor(int zone) {
   switch (zone) {
-    case 1: return strip.Color(0, 0, 255);
-    case 2: return strip.Color(0, 255, 0);
-    case 3: return strip.Color(255, 255, 0);
-    case 4: return strip.Color(255, 165, 0);
-    case 5: return strip.Color(255, 0, 0);
+    case 1: return strip.Color(75 * 0.8, 0 * 0.8, 130 * 0.8);
+    case 2: return strip.Color(0 * 0.8, 0 * 0.8, 255 * 0.8);
+    case 3: return strip.Color(255 * 0.8, 255 * 0.8, 0 * 0.8);
+    case 4: return strip.Color(255 * 0.8, 165 * 0.8, 0 * 0.8);
+    case 5: return strip.Color(255 * 0.8, 0 * 0.8, 0 * 0.8);
+    case 6: return strip.Color(255 * 0.8, 192 * 0.8, 203 * 0.8);
     default: return strip.Color(0, 0, 0);
   }
 }
