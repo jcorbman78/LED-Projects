@@ -1,0 +1,434 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <Adafruit_NeoPixel.h>
+#include <deque>
+
+#define LED_PIN 4
+#define LED_COUNT 144
+#define SCAN_TIME 60
+#define RETRY_DELAY 5000
+#define SAMPLE_RATE 10
+#define SMOOTHING_WINDOW SAMPLE_RATE
+#define BRIGHTNESS_PERCENT 80
+
+// Power Zones
+#define ZONE_1_MAX 50
+#define ZONE_1A_MAX 51
+#define ZONE_2_MAX 125
+#define ZONE_2A_MAX 150
+#define ZONE_3_MAX 160
+#define ZONE_3A_MAX 200
+#define ZONE_4_MAX 212
+#define ZONE_4A_MAX 260
+#define ZONE_5_MAX 273
+#define ZONE_5A_MAX 370
+#define ZONE_6_MAX 380
+
+// Heart Rate Zones
+#define HR_ZONE_1_MAX 80
+#define HR_ZONE_2_MAX 100
+#define HR_ZONE_3_MAX 120
+#define HR_ZONE_4_MAX 140
+#define HR_ZONE_5_MAX 160
+#define HR_ZONE_6_MAX 180
+
+// Pulse Effects
+#define PULSE_FADE_IN_DURATION 150
+#define PULSE_FADE_OUT_DURATION 250
+#define PULSE_HOLD_DURATION 100
+#define PULSE_DELAY 150
+#define PULSE_FADE_IN_DURATION_2 180
+#define PULSE_FADE_OUT_DURATION_2 500
+#define PULSE_HOLD_DURATION_2 120
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Power Variables
+static BLEUUID powerServiceUUID("1818");
+static BLEUUID powerCharUUID("2A63");
+static boolean powerDoConnect = false;
+static boolean powerConnected = false;
+static boolean powerDoScan = true;
+static BLERemoteCharacteristic* powerRemoteCharacteristic;
+static BLERemoteService* powerRemoteService;
+static BLEAddress* powerServerAddress;
+BLEAddress powerTargetAddress("C9:35:6D:0D:51:03");
+std::deque<int16_t> powerHistory;
+
+// Heart Rate Variables
+static BLEUUID hrServiceUUID("180D");
+static BLEUUID hrCharUUID("2A37");
+static boolean hrDoConnect = false;
+static boolean hrConnected = false;
+static boolean hrDoScan = true;
+static BLERemoteCharacteristic* hrRemoteCharacteristic;
+static BLERemoteService* hrRemoteService;
+static BLEAddress* hrServerAddress;
+unsigned long lastHeartbeatTime = 0;
+int currentHeartRate = 0;
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    // Attempt to get the Power Service
+    BLERemoteService* powerService = pclient->getService(powerServiceUUID);
+    if (powerService != nullptr) {
+      powerConnected = true;
+      powerDoScan = false;
+      Serial.println("Power Client Connected");
+    } else {
+      // Attempt to get the HR Service
+      BLERemoteService* hrService = pclient->getService(hrServiceUUID);
+      if (hrService != nullptr) {
+        hrConnected = true;
+        hrDoScan = false;
+        Serial.println("HR Client Connected");
+      }
+    }
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    // Check if the Power Service exists
+    BLERemoteService* powerService = pclient->getService(powerServiceUUID);
+    if (powerService != nullptr) {
+      powerConnected = false;
+      powerDoScan = true;
+      Serial.println("Power Client Disconnected");
+      powerHistory.clear();
+    } else {
+      // Check if the HR service exists.
+      BLERemoteService* hrService = pclient->getService(hrServiceUUID);
+      if (hrService != nullptr) {
+        hrConnected = false;
+        hrDoScan = true;
+        Serial.println("HR Client Disconnected");
+      }
+    }
+  }
+};
+
+static void powerNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  if (length >= 4) {
+    int16_t power = (pData[3] << 8) | pData[2];
+    powerHistory.push_back(power);
+    if (powerHistory.size() > SMOOTHING_WINDOW) {
+      powerHistory.pop_front();
+    }
+    int32_t sum = 0;
+    for (int16_t p : powerHistory) {
+      sum += p;
+    }
+    int16_t smoothedPower = powerHistory.empty() ? 0 : sum / powerHistory.size();
+    Serial.print("Smoothed Power: ");
+    Serial.println(smoothedPower);
+    updatePowerLEDs(smoothedPower);
+  } else {
+    Serial.println("Error: Power data length is invalid.");
+  }
+}
+
+static void hrNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  if (length > 1) {
+    currentHeartRate = pData[1];
+    Serial.print("Heart Rate: ");
+    Serial.println(currentHeartRate);
+    lastHeartbeatTime = millis();
+    pulseHRLEDs();
+  } else {
+    Serial.println("Error: Heart rate data length is invalid.");
+  }
+}
+
+// Power Functions
+int getPowerZone(int power) {
+  if (power <= ZONE_1_MAX) return 1;
+  if (power <= ZONE_1A_MAX) return 15;
+  if (power <= ZONE_2_MAX) return 2;
+  if (power <= ZONE_2A_MAX) return 25;
+  if (power <= ZONE_3_MAX) return 3;
+  if (power <= ZONE_3A_MAX) return 35;
+  if (power <= ZONE_4_MAX) return 4;
+  if (power <= ZONE_4A_MAX) return 45;
+  if (power <= ZONE_5_MAX) return 5;
+  if (power <= ZONE_5A_MAX) return 55;
+  if (power <= ZONE_6_MAX) return 6;
+  return 7;
+}
+
+uint32_t getPowerZoneColor(int zone) {
+  switch (zone) {
+    case 1: return strip.Color(75, 75, 75);
+    case 15: return strip.Color(100, 0, 155);
+    case 2: return strip.Color(0, 0, 255);
+    case 25: return strip.Color(0, 100, 255);
+    case 3: return strip.Color(0, 255, 0);
+    case 35: return strip.Color(100, 255, 100);
+    case 4: return strip.Color(255, 255, 0);
+    case 45: return strip.Color(255, 200, 0);
+    case 5: return strip.Color(255, 165, 0);
+    case 55: return strip.Color(255, 100, 0);
+    case 6: return strip.Color(255, 0, 0);
+    case 7: return strip.Color(255, 192, 203);
+    default: return strip.Color(0, 0, 0);
+  }
+}
+
+void updatePowerLEDs(int power) {
+  int zone = getPowerZone(power);
+  uint32_t color = getPowerZoneColor(zone);
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+  r = (r * BRIGHTNESS_PERCENT) / 100;
+  g = (g * BRIGHTNESS_PERCENT) / 100;
+  b = (b * BRIGHTNESS_PERCENT) / 100;
+  for (int i = 0; i < 72; i++) {
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
+  strip.show();
+}
+// Heart Rate Functions
+int getHeartRateZone(int heartRate) {
+  if (heartRate <= HR_ZONE_1_MAX) return 1;
+  if (heartRate <= HR_ZONE_2_MAX) return 2;
+  if (heartRate <= HR_ZONE_3_MAX) return 3;
+  if (heartRate <= HR_ZONE_4_MAX) return 4;
+  if (heartRate <= HR_ZONE_5_MAX) return 5;
+  if (heartRate <= HR_ZONE_6_MAX) return 6;
+  return 7;
+}
+
+uint32_t getHeartRateZoneColor(int zone) {
+  switch (zone) {
+    case 1: return strip.Color(0, 255, 0);
+    case 2: return strip.Color(50, 205, 50);
+    case 3: return strip.Color(255, 255, 0);
+    case 4: return strip.Color(255, 165, 0);
+    case 5: return strip.Color(255, 69, 0);
+    case 6: return strip.Color(255, 0, 0);
+    case 7: return strip.Color(139, 0, 0);
+    default: return strip.Color(0, 0, 0);
+  }
+}
+
+void fadeHRLEDs(uint32_t color, int fadeDuration, bool fadeIn) {
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+
+  int steps = 20;
+  float stepDelay = (float)fadeDuration / steps;
+
+  for (int step = 0; step <= steps; step++) {
+    float brightness = fadeIn ? (float)step / steps : 1.0 - (float)step / steps;
+    uint8_t fadedR = r * brightness;
+    uint8_t fadedG = g * brightness;
+    uint8_t fadedB = b * brightness;
+
+    for (int i = 72; i < LED_COUNT; i++) {
+      strip.setPixelColor(i, strip.Color(fadedR, fadedG, fadedB));
+    }
+    strip.show();
+    delay(stepDelay);
+  }
+}
+
+void pulseHRLEDs() {
+  int zone = getHeartRateZone(currentHeartRate);
+  uint32_t color = getHeartRateZoneColor(zone);
+
+  fadeHRLEDs(color, PULSE_FADE_IN_DURATION, true);
+  delay(PULSE_HOLD_DURATION);
+  fadeHRLEDs(color, PULSE_FADE_OUT_DURATION, false);
+
+  delay(PULSE_DELAY);
+
+  fadeHRLEDs(color, PULSE_FADE_IN_DURATION_2, true);
+  delay(PULSE_HOLD_DURATION_2);
+  fadeHRLEDs(color, PULSE_FADE_OUT_DURATION_2, false);
+}
+
+// Advertised Device Callbacks
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("BLE Advertised Device found: ");
+    Serial.println(advertisedDevice.toString().c_str());
+    Serial.print("RSSI: ");
+    Serial.println(advertisedDevice.getRSSI());
+
+    if (advertisedDevice.getAddress() == powerTargetAddress) {
+      Serial.print("Target Power Meter found. address: ");
+      Serial.println(advertisedDevice.getAddress().toString().c_str());
+      advertisedDevice.getScan()->stop();
+      powerServerAddress = new BLEAddress(advertisedDevice.getAddress());
+      powerDoConnect = true;
+    }
+
+    if (advertisedDevice.isAdvertisingService(hrServiceUUID)) {
+      Serial.print("Heart Rate Device found. address: ");
+      Serial.println(advertisedDevice.getAddress().toString().c_str());
+      advertisedDevice.getScan()->stop();
+      hrServerAddress = new BLEAddress(advertisedDevice.getAddress());
+      hrDoConnect = true;
+    }
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.show();
+  BLEDevice::init("ESP32_Power_HR_LED");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(SCAN_TIME);
+}
+
+void scanBlink() {
+  for (int i = 0; i < 72; i++) {
+    strip.setPixelColor(i, 0, 0, 255);
+  }
+  for(int i = 72; i < LED_COUNT; i++){
+    strip.setPixelColor(i, strip.Color(0, 255, 255));
+  }
+  strip.show();
+  delay(250);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
+  strip.show();
+  delay(250);
+}
+
+void loop() {
+  unsigned long lastScanBlink = 0;
+  const long scanBlinkInterval = 500;
+
+  if (powerDoConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    Serial.println("Attempting to connect to Power Meter...");
+    delay(200);
+
+    if (pClient->connect(*powerServerAddress)) {
+      Serial.println("Connected to Power Meter");
+      delay(200);
+
+      if (pClient->isConnected()) {
+        Serial.println("Power Client is connected.");
+        powerRemoteService = pClient->getService(powerServiceUUID);
+
+        if (powerRemoteService) {
+          Serial.println("Power Service found");
+          powerRemoteCharacteristic = powerRemoteService->getCharacteristic(powerCharUUID);
+
+          if (powerRemoteCharacteristic) {
+            Serial.println("Power Characteristic found");
+
+            if (powerRemoteCharacteristic->canNotify()) {
+              Serial.println("Power Characteristic can notify");
+              powerRemoteCharacteristic->registerForNotify(powerNotifyCallback);
+              powerConnected = true;
+              powerDoConnect = false;
+            } else {
+              Serial.println("Error: Power Characteristic cannot notify");
+              pClient->disconnect();
+              powerDoConnect = false;
+            }
+          } else {
+            Serial.println("Error: Power Characteristic not found");
+            pClient->disconnect();
+            powerDoConnect = false;
+          }
+        } else {
+          Serial.println("Error: Power Service not found");
+          pClient->disconnect();
+          powerDoConnect = false;
+        }
+      } else {
+        Serial.println("Error: Power Client is not connected after connect function");
+        pClient->disconnect();
+        powerDoConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to Power Meter");
+      powerDoConnect = false;
+    }
+    if (!powerConnected) {
+      Serial.println("Power Connection failed. Restarting scan after delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+    }
+  }
+if (hrDoConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    Serial.println("Attempting to connect to Heart Rate Monitor...");
+    delay(200);
+
+    if (pClient->connect(*hrServerAddress)) {
+      Serial.println("Connected to Heart Rate Monitor");
+      delay(200);
+
+      if (pClient->isConnected()) {
+        Serial.println("HR Client is connected.");
+        hrRemoteService = pClient->getService(hrServiceUUID);
+
+        if (hrRemoteService) {
+          Serial.println("HR Service found");
+          hrRemoteCharacteristic = hrRemoteService->getCharacteristic(hrCharUUID);
+
+          if (hrRemoteCharacteristic) {
+            Serial.println("HR Characteristic found");
+
+            if (hrRemoteCharacteristic->canNotify()) {
+              Serial.println("HR Characteristic can notify");
+              hrRemoteCharacteristic->registerForNotify(hrNotifyCallback);
+              hrConnected = true;
+              hrDoConnect = false;
+            } else {
+              Serial.println("Error: HR Characteristic cannot notify");
+              pClient->disconnect();
+              hrDoConnect = false;
+            }
+          } else {
+            Serial.println("Error: HR Characteristic not found");
+            pClient->disconnect();
+            hrDoConnect = false;
+          }
+        } else {
+          Serial.println("Error: HR Service not found");
+          pClient->disconnect();
+          hrDoConnect = false;
+        }
+      } else {
+        Serial.println("Error: HR Client is not connected after connect function");
+        pClient->disconnect();
+        hrDoConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to Heart Rate Monitor");
+      hrDoConnect = false;
+    }
+    if (!hrConnected) {
+      Serial.println("HR Connection failed. Restarting scan after delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+    }
+  }
+
+  if (powerConnected || hrConnected) {
+    // No need to call readValue() here if you are using notifyCallback
+  } else if (powerDoScan || hrDoScan) {
+    if (millis() - lastScanBlink >= scanBlinkInterval) {
+      scanBlink();
+      lastScanBlink = millis();
+    }
+  }
+
+  delay(10);
+}
