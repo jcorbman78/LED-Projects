@@ -7,7 +7,7 @@
 
 #define LED_PIN 4
 #define LED_COUNT 144
-#define SCAN_TIME 60
+#define SCAN_TIME 10
 #define RETRY_DELAY 5000
 #define SAMPLE_RATE 10
 #define SMOOTHING_WINDOW SAMPLE_RATE
@@ -48,62 +48,50 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // Power Variables
 static BLEUUID powerServiceUUID("1818");
 static BLEUUID powerCharUUID("2A63");
-static boolean powerDoConnect = false;
-static boolean powerConnected = false;
-static boolean powerDoScan = true;
-static BLERemoteCharacteristic* powerRemoteCharacteristic;
-static BLERemoteService* powerRemoteService;
-static BLEAddress* powerServerAddress;
 BLEAddress powerTargetAddress("C9:35:6D:0D:51:03");
 std::deque<int16_t> powerHistory;
 
 // Heart Rate Variables
 static BLEUUID hrServiceUUID("180D");
 static BLEUUID hrCharUUID("2A37");
-static boolean hrDoConnect = false;
-static boolean hrConnected = false;
-static boolean hrDoScan = true;
-static BLERemoteCharacteristic* hrRemoteCharacteristic;
-static BLERemoteService* hrRemoteService;
-static BLEAddress* hrServerAddress;
 unsigned long lastHeartbeatTime = 0;
 int currentHeartRate = 0;
 
+// Connection States
+enum ConnectionState {
+  STATE_IDLE,
+  STATE_SCANNING,
+  STATE_CONNECTING_POWER,
+  STATE_CONNECTED_POWER,
+  STATE_CONNECTING_HR,
+  STATE_CONNECTED_HR,
+  STATE_DISCONNECTING
+};
+
+ConnectionState currentState = STATE_IDLE;
+BLEAddress powerServerAddress;
+BLEAddress hrServerAddress;
+BLEClient* pClient = nullptr;
+unsigned long lastScanTime = 0;
+const unsigned long scanInterval = 10000; // 10 seconds scan interval
+
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient* pclient) {
-    // Attempt to get the Power Service
-    BLERemoteService* powerService = pclient->getService(powerServiceUUID);
-    if (powerService != nullptr) {
-      powerConnected = true;
-      powerDoScan = false;
+    if (pclient->getService(powerServiceUUID)) {
+      currentState = STATE_CONNECTED_POWER;
       Serial.println("Power Client Connected");
-    } else {
-      // Attempt to get the HR Service
-      BLERemoteService* hrService = pclient->getService(hrServiceUUID);
-      if (hrService != nullptr) {
-        hrConnected = true;
-        hrDoScan = false;
-        Serial.println("HR Client Connected");
-      }
+    } else if (pclient->getService(hrServiceUUID)) {
+      currentState = STATE_CONNECTED_HR;
+      Serial.println("HR Client Connected");
     }
   }
 
   void onDisconnect(BLEClient* pclient) {
-    // Check if the Power Service exists
-    BLERemoteService* powerService = pclient->getService(powerServiceUUID);
-    if (powerService != nullptr) {
-      powerConnected = false;
-      powerDoScan = true;
-      Serial.println("Power Client Disconnected");
-      powerHistory.clear();
-    } else {
-      // Check if the HR service exists.
-      BLERemoteService* hrService = pclient->getService(hrServiceUUID);
-      if (hrService != nullptr) {
-        hrConnected = false;
-        hrDoScan = true;
-        Serial.println("HR Client Disconnected");
-      }
+    Serial.println("Client Disconnected");
+    currentState = STATE_SCANNING;
+    if(pClient != nullptr){
+        delete pClient;
+        pClient = nullptr;
     }
   }
 };
@@ -257,20 +245,20 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     Serial.print("RSSI: ");
     Serial.println(advertisedDevice.getRSSI());
 
-    if (advertisedDevice.getAddress() == powerTargetAddress) {
+    if (advertisedDevice.getAddress() == powerTargetAddress && currentState == STATE_SCANNING) {
       Serial.print("Target Power Meter found. address: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
       advertisedDevice.getScan()->stop();
-      powerServerAddress = new BLEAddress(advertisedDevice.getAddress());
-      powerDoConnect = true;
+      powerServerAddress = advertisedDevice.getAddress();
+      currentState = STATE_CONNECTING_POWER;
     }
 
-    if (advertisedDevice.isAdvertisingService(hrServiceUUID)) {
+    if (advertisedDevice.isAdvertisingService(hrServiceUUID) && currentState == STATE_SCANNING) {
       Serial.print("Heart Rate Device found. address: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
       advertisedDevice.getScan()->stop();
-      hrServerAddress = new BLEAddress(advertisedDevice.getAddress());
-      hrDoConnect = true;
+      hrServerAddress = advertisedDevice.getAddress();
+      currentState = STATE_CONNECTING_HR;
     }
   }
 };
@@ -283,14 +271,16 @@ void setup() {
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(SCAN_TIME);
+  currentState = STATE_SCANNING;
+  lastScanTime = millis();
+  pBLEScan->start(SCAN_TIME, false); // No need to restart scan after finish
 }
 
 void scanBlink() {
   for (int i = 0; i < 72; i++) {
     strip.setPixelColor(i, 0, 0, 255);
   }
-  for(int i = 72; i < LED_COUNT; i++){
+  for (int i = 72; i < LED_COUNT; i++) {
     strip.setPixelColor(i, strip.Color(0, 255, 255));
   }
   strip.show();
@@ -303,132 +293,50 @@ void scanBlink() {
 }
 
 void loop() {
-  unsigned long lastScanBlink = 0;
-  const long scanBlinkInterval = 500;
-
-  if (powerDoConnect) {
-    BLEClient* pClient = BLEDevice::createClient();
-    pClient->setClientCallbacks(new MyClientCallback());
-
-    Serial.println("Attempting to connect to Power Meter...");
-    delay(200);
-
-    if (pClient->connect(*powerServerAddress)) {
-      Serial.println("Connected to Power Meter");
-      delay(200);
-
-      if (pClient->isConnected()) {
-        Serial.println("Power Client is connected.");
-        powerRemoteService = pClient->getService(powerServiceUUID);
-
-        if (powerRemoteService) {
-          Serial.println("Power Service found");
-          powerRemoteCharacteristic = powerRemoteService->getCharacteristic(powerCharUUID);
-
-          if (powerRemoteCharacteristic) {
-            Serial.println("Power Characteristic found");
-
-            if (powerRemoteCharacteristic->canNotify()) {
-              Serial.println("Power Characteristic can notify");
-              powerRemoteCharacteristic->registerForNotify(powerNotifyCallback);
-              powerConnected = true;
-              powerDoConnect = false;
-            } else {
-              Serial.println("Error: Power Characteristic cannot notify");
-              pClient->disconnect();
-              powerDoConnect = false;
-            }
-          } else {
-            Serial.println("Error: Power Characteristic not found");
-            pClient->disconnect();
-            powerDoConnect = false;
-          }
-        } else {
-          Serial.println("Error: Power Service not found");
-          pClient->disconnect();
-          powerDoConnect = false;
-        }
-      } else {
-        Serial.println("Error: Power Client is not connected after connect function");
-        pClient->disconnect();
-        powerDoConnect = false;
-      }
-    } else {
-      Serial.println("Error: Failed to connect to Power Meter");
-      powerDoConnect = false;
-    }
-    if (!powerConnected) {
-      Serial.println("Power Connection failed. Restarting scan after delay...");
-      delay(RETRY_DELAY);
-      BLEDevice::getScan()->start(SCAN_TIME);
-    }
-  }
-if (hrDoConnect) {
-    BLEClient* pClient = BLEDevice::createClient();
-    pClient->setClientCallbacks(new MyClientCallback());
-
-    Serial.println("Attempting to connect to Heart Rate Monitor...");
-    delay(200);
-
-    if (pClient->connect(*hrServerAddress)) {
-      Serial.println("Connected to Heart Rate Monitor");
-      delay(200);
-
-      if (pClient->isConnected()) {
-        Serial.println("HR Client is connected.");
-        hrRemoteService = pClient->getService(hrServiceUUID);
-
-        if (hrRemoteService) {
-          Serial.println("HR Service found");
-          hrRemoteCharacteristic = hrRemoteService->getCharacteristic(hrCharUUID);
-
-          if (hrRemoteCharacteristic) {
-            Serial.println("HR Characteristic found");
-
-            if (hrRemoteCharacteristic->canNotify()) {
-              Serial.println("HR Characteristic can notify");
-              hrRemoteCharacteristic->registerForNotify(hrNotifyCallback);
-              hrConnected = true;
-              hrDoConnect = false;
-            } else {
-              Serial.println("Error: HR Characteristic cannot notify");
-              pClient->disconnect();
-              hrDoConnect = false;
-            }
-          } else {
-            Serial.println("Error: HR Characteristic not found");
-            pClient->disconnect();
-            hrDoConnect = false;
-          }
-        } else {
-          Serial.println("Error: HR Service not found");
-          pClient->disconnect();
-          hrDoConnect = false;
-        }
-      } else {
-        Serial.println("Error: HR Client is not connected after connect function");
-        pClient->disconnect();
-        hrDoConnect = false;
-      }
-    } else {
-      Serial.println("Error: Failed to connect to Heart Rate Monitor");
-      hrDoConnect = false;
-    }
-    if (!hrConnected) {
-      Serial.println("HR Connection failed. Restarting scan after delay...");
-      delay(RETRY_DELAY);
-      BLEDevice::getScan()->start(SCAN_TIME);
-    }
-  }
-
-  if (powerConnected || hrConnected) {
-    // No need to call readValue() here if you are using notifyCallback
-  } else if (powerDoScan || hrDoScan) {
-    if (millis() - lastScanBlink >= scanBlinkInterval) {
+  unsigned long currentTime = millis();
+  if (currentState == STATE_SCANNING) {
+    if (currentTime - lastScanTime >= scanInterval) {
+      BLEDevice::getScan()->start(SCAN_TIME, false);
+      lastScanTime = currentTime;
       scanBlink();
-      lastScanBlink = millis();
     }
+  } else if (currentState == STATE_CONNECTING_POWER) {
+    connectToDevice(powerServerAddress, powerServiceUUID, powerCharUUID, powerNotifyCallback);
+  } else if (currentState == STATE_CONNECTING_HR) {
+    connectToDevice(hrServerAddress, hrServiceUUID, hrCharUUID, hrNotifyCallback);
+  } else if (currentState == STATE_CONNECTED_POWER || currentState == STATE_CONNECTED_HR) {
+    // Leave it to notify callbacks to update LEDs.
   }
 
   delay(10);
+}
+
+void connectToDevice(BLEAddress address, BLEUUID serviceUUID, BLEUUID charUUID, void (*notifyCallback)(BLERemoteCharacteristic*, uint8_t*, size_t, bool)) {
+  if (pClient != nullptr) {
+    delete pClient;
+    pClient = nullptr;
+  }
+  pClient = BLEDevice::createClient();
+  pClient->setClientCallbacks(new MyClientCallback());
+
+  Serial.println("Attempting to connect...");
+  if (pClient->connect(address)) {
+    Serial.println("Connected");
+    BLERemoteService* remoteService = pClient->getService(serviceUUID);
+    if (remoteService) {
+      BLERemoteCharacteristic* remoteCharacteristic = remoteService->getCharacteristic(charUUID);
+      if (remoteCharacteristic && remoteCharacteristic->canNotify()) {
+        remoteCharacteristic->registerForNotify(notifyCallback);
+      } else {
+        Serial.println("Characteristic or notify failed");
+        pClient->disconnect();
+      }
+    } else {
+      Serial.println("Service failed");
+      pClient->disconnect();
+    }
+  } else {
+    Serial.println("Connect failed");
+    currentState = STATE_SCANNING;
+  }
 }
