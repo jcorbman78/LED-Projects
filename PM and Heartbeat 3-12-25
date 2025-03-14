@@ -69,8 +69,6 @@ enum ConnectionState {
 };
 
 ConnectionState currentState = STATE_IDLE;
-BLEAddress powerServerAddress;
-BLEAddress hrServerAddress;
 BLEClient* pClient = nullptr;
 unsigned long lastScanTime = 0;
 const unsigned long scanInterval = 10000; // 10 seconds scan interval
@@ -89,9 +87,9 @@ class MyClientCallback : public BLEClientCallbacks {
   void onDisconnect(BLEClient* pclient) {
     Serial.println("Client Disconnected");
     currentState = STATE_SCANNING;
-    if(pClient != nullptr){
-        delete pClient;
-        pClient = nullptr;
+    if (pClient != nullptr) {
+      delete pClient;
+      pClient = nullptr;
     }
   }
 };
@@ -161,7 +159,6 @@ uint32_t getPowerZoneColor(int zone) {
     default: return strip.Color(0, 0, 0);
   }
 }
-
 void updatePowerLEDs(int power) {
   int zone = getPowerZone(power);
   uint32_t color = getPowerZoneColor(zone);
@@ -176,6 +173,7 @@ void updatePowerLEDs(int power) {
   }
   strip.show();
 }
+
 // Heart Rate Functions
 int getHeartRateZone(int heartRate) {
   if (heartRate <= HR_ZONE_1_MAX) return 1;
@@ -249,16 +247,18 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       Serial.print("Target Power Meter found. address: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
       advertisedDevice.getScan()->stop();
-      powerServerAddress = advertisedDevice.getAddress();
+      BLEAddress powerServerAddress = advertisedDevice.getAddress();
       currentState = STATE_CONNECTING_POWER;
+      connectToDevice(powerServerAddress, powerServiceUUID, powerCharUUID, powerNotifyCallback);
     }
 
     if (advertisedDevice.isAdvertisingService(hrServiceUUID) && currentState == STATE_SCANNING) {
       Serial.print("Heart Rate Device found. address: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
       advertisedDevice.getScan()->stop();
-      hrServerAddress = advertisedDevice.getAddress();
+      BLEAddress hrServerAddress = advertisedDevice.getAddress();
       currentState = STATE_CONNECTING_HR;
+      connectToDevice(hrServerAddress, hrServiceUUID, hrCharUUID, hrNotifyCallback);
     }
   }
 };
@@ -300,10 +300,8 @@ void loop() {
       lastScanTime = currentTime;
       scanBlink();
     }
-  } else if (currentState == STATE_CONNECTING_POWER) {
-    connectToDevice(powerServerAddress, powerServiceUUID, powerCharUUID, powerNotifyCallback);
-  } else if (currentState == STATE_CONNECTING_HR) {
-    connectToDevice(hrServerAddress, hrServiceUUID, hrCharUUID, hrNotifyCallback);
+  } else if (currentState == STATE_CONNECTING_POWER || currentState == STATE_CONNECTING_HR) {
+    //Connections are handled inside the onResult function.
   } else if (currentState == STATE_CONNECTED_POWER || currentState == STATE_CONNECTED_HR) {
     // Leave it to notify callbacks to update LEDs.
   }
