@@ -8,11 +8,11 @@
 #define LED_COUNT 144
 #define SCAN_TIME 60
 #define RETRY_DELAY 5000
-#define PULSE_FADE_IN_DURATION 150  // Quick fade-in (first pulse)
-#define PULSE_FADE_OUT_DURATION 250 // Slow fade-out (first pulse)
+#define PULSE_FADE_IN_DURATION 50  // Quick fade-in (first pulse)
+#define PULSE_FADE_OUT_DURATION 150 // Slow fade-out (first pulse)
 #define PULSE_HOLD_DURATION 100      // Duration at full brightness (first pulse)
-#define PULSE_DELAY 150              // Delay between pulses
-#define PULSE_FADE_IN_DURATION_2 180 // Quick fade-in (second pulse)
+#define PULSE_DELAY 50              // Delay between pulses
+#define PULSE_FADE_IN_DURATION_2 100 // Quick fade-in (second pulse)
 #define PULSE_FADE_OUT_DURATION_2 500 // Slow fade-out (second pulse)
 #define PULSE_HOLD_DURATION_2 120 // Duration at full brightness (second pulse)
 
