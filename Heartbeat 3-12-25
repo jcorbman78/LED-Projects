@@ -8,18 +8,18 @@
 #define LED_COUNT 144
 #define SCAN_TIME 60
 #define RETRY_DELAY 5000
-#define PULSE_FADE_IN_DURATION 50  // Quick fade-in (first pulse)
-#define PULSE_FADE_OUT_DURATION 150 // Slow fade-out (first pulse)
-#define PULSE_HOLD_DURATION 100      // Duration at full brightness (first pulse)
-#define PULSE_DELAY 50              // Delay between pulses
-#define PULSE_FADE_IN_DURATION_2 100 // Quick fade-in (second pulse)
-#define PULSE_FADE_OUT_DURATION_2 500 // Slow fade-out (second pulse)
-#define PULSE_HOLD_DURATION_2 120 // Duration at full brightness (second pulse)
+#define PULSE_FADE_IN_DURATION 50    // Quick fade-in (first pulse)
+#define PULSE_FADE_OUT_DURATION 150   // Slow fade-out (first pulse)
+#define PULSE_HOLD_DURATION 100       // Duration at full brightness (first pulse)
+#define PULSE_DELAY 50             // Delay between pulses
+#define PULSE_FADE_IN_DURATION_2 100  // Quick fade-in (second pulse)
+#define PULSE_FADE_OUT_DURATION_2 500 // Very slow fade-out (second pulse)
+#define PULSE_HOLD_DURATION_2 120    // Duration at full brightness (second pulse)
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 static BLEUUID serviceUUID("180D"); // Heart Rate Service UUID
-static BLEUUID charUUID("2A37");    // Heart Rate Measurement Characteristic UUID
+static BLEUUID charUUID("2A37");     // Heart Rate Measurement Characteristic UUID
 
 static boolean doConnect = false;
 static boolean connected = false;
@@ -42,6 +42,10 @@ class MyClientCallback : public BLEClientCallbacks {
     connected = false;
     doScan = true;
     Serial.println("Client Disconnected");
+    if (pServerAddress != nullptr) {
+      delete pServerAddress;
+      pServerAddress = nullptr;
+    }
   }
 };
 
@@ -230,6 +234,7 @@ void loop() {
   }
 
   if (connected) {
+    // Connection is active, notify callback handles LED pulsing
   } else if (doScan) {
     if (millis() - lastScanBlink >= scanBlinkInterval) {
       scanBlink();
@@ -237,5 +242,7 @@ void loop() {
     }
   }
 
+  Serial.print("Free Heap: ");
+  Serial.println(ESP.getFreeHeap());
   delay(10);
 }
