@@ -7,7 +7,7 @@
 
 #define LED_PIN 4
 #define LED_COUNT 144
-#define SCAN_TIME 10
+#define SCAN_TIME 60
 #define RETRY_DELAY 5000
 #define SAMPLE_RATE 10
 #define SMOOTHING_WINDOW SAMPLE_RATE
