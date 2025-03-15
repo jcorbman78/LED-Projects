@@ -1,122 +1,18 @@
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
-#include <Adafruit_NeoPixel.h>
-#include <deque>
-
-#define LED_PIN 4
-#define LED_COUNT 144
-#define SCAN_TIME 60
-#define RETRY_DELAY 5000
-#define SAMPLE_RATE 10 // Approximate samples per second. Adjust as needed.
-#define SMOOTHING_WINDOW SAMPLE_RATE // 1-second window
-#define BRIGHTNESS_PERCENT 80 // Reduced brightness to 80%
-
-// Define power zones and sub-zones
-#define ZONE_1_MAX 50
-#define ZONE_1A_MAX 51
-#define ZONE_2_MAX 125
-#define ZONE_2A_MAX 150
-#define ZONE_3_MAX 160
-#define ZONE_3A_MAX 200
-#define ZONE_4_MAX 212
-#define ZONE_4A_MAX 260
-#define ZONE_5_MAX 273
-#define ZONE_5A_MAX 370
-#define ZONE_6_MAX 380
-
-// Define LED counts for each zone
-#define ZONE_1_LEDS 90
-#define ZONE_2_LEDS 100
-#define ZONE_3_LEDS 110
-#define ZONE_4_LEDS 120
-#define ZONE_5_LEDS 130
-#define ZONE_6_LEDS 144
-
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-static BLEUUID serviceUUID("1818"); // Cycling Power Service UUID
-static BLEUUID charUUID("2A63");  // Cycling Power Measurement Characteristic UUID
-
-static boolean doConnect = false;
-static boolean connected = false;
-static boolean doScan = true;
-static BLERemoteCharacteristic* pRemoteCharacteristic;
-static BLERemoteService* pRemoteService;
-static BLEAddress* pServerAddress;
-
-BLEAddress targetAddress("C9:35:6D:0D:51:03"); // Target Power Meter Address
-
-std::deque<int16_t> powerHistory; // Store power samples for smoothing
-
-class MyClientCallback : public BLEClientCallbacks {
- void onConnect(BLEClient* pclient) {
-  connected = true;
-  doScan = false;
-  Serial.println("Client Connected");
- }
-
- void onDisconnect(BLEClient* pclient) {
-  connected = false;
-  doScan = true;
-  Serial.println("Client Disconnected");
-  powerHistory.clear(); // Clear history on disconnect.
- }
-};
-
-static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
- if (length >= 4) { // Ensure enough data for power measurement
-  int16_t power = (pData[3] << 8) | pData[2]; // Power is in bytes 2 and 3 (little-endian)
-  powerHistory.push_back(power);
-
-  if (powerHistory.size() > SMOOTHING_WINDOW) {
-   powerHistory.pop_front();
-  }
-
-  int32_t sum = 0;
-  for (int16_t p : powerHistory) {
-   sum += p;
-  }
-
-  int16_t smoothedPower = powerHistory.empty() ? 0 : sum / powerHistory.size(); // Calculate average
-  Serial.print("Smoothed Power: ");
-  Serial.println(smoothedPower);
-  updateLEDs(smoothedPower);
- } else {
-  Serial.println("Error: Power data length is invalid.");
- }
-}
-
-int getPowerZone(int power) {
- if (power <= ZONE_1_MAX) return 1;
- if (power <= ZONE_1A_MAX) return 15; // 1.5 for 1A
- if (power <= ZONE_2_MAX) return 2;
- if (power <= ZONE_2A_MAX) return 25; // 2.5 for 2A
- if (power <= ZONE_3_MAX) return 3;
- if (power <= ZONE_3A_MAX) return 35; // 3.5 for 3A
- if (power <= ZONE_4_MAX) return 4;
- if (power <= ZONE_4A_MAX) return 45; // 4.5 for 4A
- if (power <= ZONE_5_MAX) return 5;
- if (power <= ZONE_5A_MAX) return 55; // 5.5 for 5A
- if (power <= ZONE_6_MAX) return 6;
- return 7;
-}
 uint32_t getZoneColor(int zone) {
  switch (zone) {
-  case 1: return strip.Color(75, 75, 75);   // Light Gray
-  case 15: return strip.Color(100, 0, 155); //Darker Purple
-  case 2: return strip.Color(0, 0, 255);   // Blue
-  case 25: return strip.Color(0, 100, 255); //lighter Blue
-  case 3: return strip.Color(0, 255, 0);   // Green
-  case 35: return strip.Color(100, 255, 100); //lighter Green
-  case 4: return strip.Color(255, 255, 0);   // Yellow
-  case 45: return strip.Color(255, 200, 0); //Darker Yellow
-  case 5: return strip.Color(255, 165, 0);   // Orange
-  case 55: return strip.Color(255, 100, 0); //Darker Orange
-  case 6: return strip.Color(255, 0, 0);   // Red
-  case 7: return strip.Color(255, 192, 203); // Pink
-  default: return strip.Color(0, 0, 0);
+ case 1: return strip.Color(75, 75, 75);  // Light Gray
+ case 15: return strip.Color(100, 0, 155); //Darker Purple
+ case 2: return strip.Color(0, 0, 255);  // Blue
+ case 25: return strip.Color(0, 100, 255); //lighter Blue
+ case 3: return strip.Color(0, 255, 0);  // Green
+ case 35: return strip.Color(100, 255, 100); //lighter Green
+ case 4: return strip.Color(255, 255, 0);  // Yellow
+ case 45: return strip.Color(255, 200, 0); //Darker Yellow
+ case 5: return strip.Color(255, 165, 0);  // Orange
+ case 55: return strip.Color(255, 100, 0); //Darker Orange
+ case 6: return strip.Color(255, 0, 0);  // Red
+ case 7: return strip.Color(255, 192, 203); // Pink
+ default: return strip.Color(0, 0, 0);
  }
 }
 
@@ -135,37 +31,37 @@ void updateLEDs(int power) {
  int startLed = 0;
 
  switch (zone) {
-  case 1:
-  case 15:
-   ledCount = ZONE_1_LEDS;
-   break;
-  case 2:
-  case 25:
-   startLed = ZONE_1_LEDS;
-   ledCount = ZONE_2_LEDS;
-   break;
-  case 3:
-  case 35:
-   startLed = ZONE_1_LEDS + ZONE_2_LEDS;
-   ledCount = ZONE_3_LEDS;
-   break;
-  case 4:
-  case 45:
-   startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS;
-   ledCount = ZONE_4_LEDS;
-   break;
-  case 5:
-  case 55:
-   startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS;
-   ledCount = ZONE_5_LEDS;
-   break;
-  case 6:
-  case 7:
-   startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS + ZONE_5_LEDS;
-   ledCount = ZONE_6_LEDS;
-   break;
-  default:
-   break;
+ case 1:
+ case 15:
+  ledCount = ZONE_1_LEDS;
+  break;
+ case 2:
+ case 25:
+  startLed = ZONE_1_LEDS;
+  ledCount = ZONE_2_LEDS;
+  break;
+ case 3:
+ case 35:
+  startLed = ZONE_1_LEDS + ZONE_2_LEDS;
+  ledCount = ZONE_3_LEDS;
+  break;
+ case 4:
+ case 45:
+  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS;
+  ledCount = ZONE_4_LEDS;
+  break;
+ case 5:
+ case 55:
+  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS;
+  ledCount = ZONE_5_LEDS;
+  break;
+ case 6:
+ case 7:
+  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS + ZONE_5_LEDS;
+  ledCount = ZONE_6_LEDS;
+  break;
+ default:
+  break;
  }
 
  for (int i = startLed; i < startLed + ledCount; i++) {
@@ -180,9 +76,9 @@ void updateLEDs(int power) {
  }
 
  if (startLed > 0){
-   for(int i = 0; i < startLed; i++){
-     strip.setPixelColor(i,0,0,0);
-   }
+  for(int i = 0; i < startLed; i++){
+   strip.setPixelColor(i,0,0,0);
+  }
  }
 
  strip.show();
