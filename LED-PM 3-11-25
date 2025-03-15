@@ -126,71 +126,73 @@ uint32_t getZoneColor(int zone) {
 }
 
 void updateLEDs(int power) {
- int zone = getPowerZone(power);
- uint32_t color = getZoneColor(zone);
- uint8_t r = (color >> 16) & 0xFF;
- uint8_t g = (color >> 8) & 0xFF;
- uint8_t b = color & 0xFF;
+  int zone = getPowerZone(power);
+  uint32_t color = getZoneColor(zone);
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
 
- r = (r * BRIGHTNESS_PERCENT) / 100;
- g = (g * BRIGHTNESS_PERCENT) / 100;
- b = (b * BRIGHTNESS_PERCENT) / 100;
+  r = (r * BRIGHTNESS_PERCENT) / 100;
+  g = (g * BRIGHTNESS_PERCENT) / 100;
+  b = (b * BRIGHTNESS_PERCENT) / 100;
 
- int ledCount = 0;
- int startLed = 0;
+  int ledCount = 0;
+  int startLed = 0;
 
- switch (zone) {
- case 1:
- case 15:
-  ledCount = ZONE_1_LEDS;
-  break;
- case 2:
- case 25:
-  startLed = ZONE_1_LEDS;
-  ledCount = ZONE_2_LEDS;
-  break;
- case 3:
- case 35:
-  startLed = ZONE_1_LEDS + ZONE_2_LEDS;
-  ledCount = ZONE_3_LEDS;
-  break;
- case 4:
- case 45:
-  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS;
-  ledCount = ZONE_4_LEDS;
-  break;
- case 5:
- case 55:
-  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS;
-  ledCount = ZONE_5_LEDS;
-  break;
- case 6:
- case 7:
-  startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS + ZONE_5_LEDS;
-  ledCount = ZONE_6_LEDS;
-  break;
- default:
-  break;
- }
+  switch (zone) {
+    case 1:
+    case 15:
+      startLed = 0; // Zone 1 starts at the beginning
+      ledCount = ZONE_1_LEDS;
+      break;
+    case 2:
+    case 25:
+      startLed = ZONE_1_LEDS; // Zone 2 starts after Zone 1
+      ledCount = ZONE_2_LEDS;
+      break;
+    case 3:
+    case 35:
+      startLed = ZONE_1_LEDS + ZONE_2_LEDS; // Zone 3 starts after Zone 1 and 2
+      ledCount = ZONE_3_LEDS;
+      break;
+    case 4:
+    case 45:
+      startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS; // Zone 4 starts after Zone 1, 2, and 3
+      ledCount = ZONE_4_LEDS;
+      break;
+    case 5:
+    case 55:
+      startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS; // Zone 5 starts after Zone 1, 2, 3, and 4
+      ledCount = ZONE_5_LEDS;
+      break;
+    case 6:
+    case 7:
+      startLed = ZONE_1_LEDS + ZONE_2_LEDS + ZONE_3_LEDS + ZONE_4_LEDS + ZONE_5_LEDS; // Zone 6 starts after Zone 1, 2, 3, 4, and 5
+      ledCount = ZONE_6_LEDS;
+      break;
+    default:
+      break;
+  }
 
- // Clear the entire strip before updating
- for (int i = 0; i < LED_COUNT; i++) {
-  strip.setPixelColor(i, 0, 0, 0);
- }
- // Update the LEDs for the current zone
- for (int i = startLed; i < startLed + ledCount; i++) {
-  strip.setPixelColor(i, strip.Color(r, g, b));
- }
+  // Clear the entire strip before updating
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
 
- strip.show();
+  // Update the LEDs for the current zone
+  for (int i = startLed; i < startLed + ledCount; i++) {
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
 
- // Debugging Serial Prints
- Serial.print("Zone: ");
- Serial.print(zone);
- Serial.print(", Start LED: ");
- Serial.print(startLed);
- Serial.print(", LED Count: ");
- Serial.println(ledCount);
+  strip.show();
+
+  // Debugging Serial Prints
+  Serial.print("Zone: ");
+  Serial.print(zone);
+  Serial.print(", Start LED: ");
+  Serial.print(startLed);
+  Serial.print(", LED Count: ");
+  Serial.println(ledCount);
 }
 
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
