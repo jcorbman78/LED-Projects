@@ -11,7 +11,7 @@
 #define RETRY_DELAY 5000
 #define SAMPLE_RATE 10 // Approximate samples per second. Adjust as needed.
 #define SMOOTHING_WINDOW (SAMPLE_RATE / 4) // 0.25-second window (SAMPLE_RATE / 4)
-#define BRIGHTNESS_PERCENT 80 // Reduced brightness to 80%
+#define BRIGHTNESS_PERCENT 50 // Reduced brightness to 50%
 
 // Define power zones and sub-zones
 #define ZONE_1_MAX 50
