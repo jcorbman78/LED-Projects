@@ -10,7 +10,7 @@
 #define SCAN_TIME 60
 #define RETRY_DELAY 5000
 #define SAMPLE_RATE 10 // Approximate samples per second. Adjust as needed.
-#define SMOOTHING_WINDOW 3 // 0.25-second window (approximately)
+#define SMOOTHING_WINDOW (SAMPLE_RATE / 4) // 0.25-second window (SAMPLE_RATE / 4)
 #define BRIGHTNESS_PERCENT 80 // Reduced brightness to 80%
 
 // Define power zones and sub-zones
@@ -109,17 +109,17 @@ int getPowerZone(int power) {
 }
 uint32_t getZoneColor(int zone) {
   switch (zone) {
-    case 1: return strip.Color(75, 75, 75);    // Light Gray
+    case 1: return strip.Color(75, 75, 75);  // Light Gray
     case 15: return strip.Color(100, 0, 155); //Darker Purple
-    case 2: return strip.Color(0, 0, 255);    // Blue
+    case 2: return strip.Color(0, 0, 255);  // Blue
     case 25: return strip.Color(0, 100, 255); //lighter Blue
-    case 3: return strip.Color(0, 255, 0);    // Green
+    case 3: return strip.Color(0, 255, 0);  // Green
     case 35: return strip.Color(100, 255, 100); //lighter Green
-    case 4: return strip.Color(255, 255, 0);    // Yellow
+    case 4: return strip.Color(255, 255, 0);  // Yellow
     case 45: return strip.Color(255, 200, 0); //Darker Yellow
-    case 5: return strip.Color(255, 165, 0);    // Orange
+    case 5: return strip.Color(255, 165, 0);  // Orange
     case 55: return strip.Color(255, 100, 0); //Darker Orange
-    case 6: return strip.Color(255, 0, 0);    // Red
+    case 6: return strip.Color(255, 0, 0);  // Red
     case 7: return strip.Color(255, 192, 203); // Pink
     default: return strip.Color(0, 0, 0);
   }
@@ -172,8 +172,128 @@ void updateLEDs(int power) {
   for (int i = 0; i < LED_COUNT; i++) {
     strip.setPixelColor(i, 0, 0, 0);
   }
-
-  // Update the LEDs for the current zone
-  for (int i = startLed; i < ledCount; i++) { //use ledCount here, not startLed + ledCount
+// Update the LEDs for the current zone
+   for (int i = startLed; i < ledCount; i++) { //use ledCount here, not startLed + ledCount
     strip.setPixelColor(i, strip.Color(r, g, b));
   }
+
+  strip.show();
+
+  // Debugging Serial Prints
+  Serial.print("Zone: ");
+  Serial.print(zone);
+  Serial.print(", Start LED: ");
+  Serial.print(startLed);
+  Serial.print(", LED Count: ");
+  Serial.println(ledCount);
+}
+
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("BLE Advertised Device found: ");
+    Serial.println(advertisedDevice.toString().c_str());
+    Serial.print("RSSI: ");
+    Serial.println(advertisedDevice.getRSSI());
+
+    if (advertisedDevice.getAddress() == targetAddress) { // Check for target address
+      Serial.print("Target Power Meter found. address: ");
+      Serial.println(advertisedDevice.getAddress().toString().c_str());
+      advertisedDevice.getScan()->stop();
+      pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+      doConnect = true;
+    }
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.show();
+  BLEDevice::init("ESP32_Power_LED");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(SCAN_TIME);
+}
+
+void loop() {
+  unsigned long lastScanBlink = 0;
+  const long scanBlinkInterval = 500;
+
+  if (doConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+    Serial.println("Attempting to connect...");
+    delay(200);
+    if (pClient->connect(*pServerAddress)) {
+      delay(200);
+      Serial.println("Connected to server");
+      if (pClient->isConnected()) {
+        Serial.println("Client is connected.");
+        pRemoteService = pClient->getService(serviceUUID);
+        if (pRemoteService != nullptr) {
+          Serial.println("Service found");
+          pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+          if (pRemoteCharacteristic != nullptr) {
+            Serial.println("Characteristic found");
+            if (pRemoteCharacteristic->canNotify()) {
+              Serial.println("Characteristic can notify");
+              pRemoteCharacteristic->registerForNotify(notifyCallback);
+              connected = true;
+              doConnect = false;
+            } else {
+              Serial.println("Error: Characteristic cannot notify");
+              pClient->disconnect();
+              doConnect = false;
+            }
+          } else {
+            Serial.println("Error: Characteristic not found");
+            pClient->disconnect();
+            doConnect = false;
+          }
+        } else {
+          Serial.println("Error: Service not found");
+          pClient->disconnect();
+          doConnect = false;
+        }
+      } else {
+        Serial.println("Error: Client is not connected after connect function");
+        pClient->disconnect();
+        doConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to server");
+      doConnect = false;
+    }
+    if (!connected) {
+      Serial.println("Connection failed. Restarting scan after delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+    }
+  }
+
+  if (connected) {
+    // No need to call readValue() here if you are using notifyCallback
+  } else if (doScan) {
+    if (millis() - lastScanBlink >= scanBlinkInterval) {
+      scanBlink();
+      lastScanBlink = millis();
+    }
+  }
+
+  // Remove or reduce the delay
+  // delay(10);
+}
+
+void scanBlink() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 255);
+  }
+  strip.show();
+  delay(250);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
+  strip.show();
+  delay(250);
+}
