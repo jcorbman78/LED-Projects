@@ -1,0 +1,132 @@
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN 4
+#define NUM_LEDS 144
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Color variables
+uint32_t colors[] = {
+    strip.Color(255, 0, 0),       // red
+    strip.Color(255, 255, 0),     // yellow
+    strip.Color(0, 255, 0),       // green
+    strip.Color(0, 255, 255),     // cyan
+    strip.Color(0, 0, 255),       // blue
+    strip.Color(255, 0, 255)      // magenta
+};
+int colorIndex = 0;
+int targetColorIndex = 1;
+
+// Fade variables
+unsigned long colorFadeStartTime = 0;
+const unsigned long colorFadeDuration = 1000; // 1 second fade
+bool colorFadeActive = true;
+
+// Brightness variables
+unsigned long brightnessFadeStartTime = 0;
+const unsigned long brightnessFadeDuration = 2500; // 2.5 seconds fade
+bool brightnessFadeActive = true;
+int brightnessDirection = 1; // 1: increase, -1: decrease
+
+// Grow/Shrink variables
+unsigned long growShrinkTimer = 0;
+const long growShrinkInterval = 100; // 0.1 seconds
+int growShrinkIndex = 0;
+int growShrinkDirection = 1; // 1: grow, -1: shrink
+
+void setup() {
+  strip.begin();
+  strip.show();
+  colorFadeStartTime = millis();
+  brightnessFadeStartTime = millis();
+  growShrinkTimer = millis();
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  uint32_t currentColor;
+  int currentBrightness;
+
+  if (colorFadeActive) {
+    if (currentTime - colorFadeStartTime <= colorFadeDuration) {
+      float progress = (float)(currentTime - colorFadeStartTime) / colorFadeDuration;
+      if (progress > 1.0f) progress = 1.0f;
+
+      uint32_t startColor = colors[colorIndex];
+      uint32_t endColor = colors[targetColorIndex];
+
+      int startRed = (startColor >> 16) & 0xFF;
+      int startGreen = (startColor >> 8) & 0xFF;
+      int startBlue = startColor & 0xFF;
+
+      int endRed = (endColor >> 16) & 0xFF;
+      int endGreen = (endColor >> 8) & 0xFF;
+      int endBlue = endColor & 0xFF;
+
+      int red = startRed + (endRed - startRed) * progress;
+      int green = startGreen + (endGreen - startGreen) * progress;
+      int blue = startBlue + (endBlue - startBlue) * progress;
+
+      currentColor = strip.Color(red, green, blue);
+    } else {
+      colorIndex = targetColorIndex;
+      targetColorIndex = (targetColorIndex + 1) % 6;
+      colorFadeStartTime = currentTime;
+      currentColor = colors[colorIndex];
+    }
+  } else {
+    currentColor = colors[colorIndex];
+  }
+
+  if (brightnessFadeActive) {
+    if (currentTime - brightnessFadeStartTime <= brightnessFadeDuration) {
+      float progress = (float)(currentTime - brightnessFadeStartTime) / brightnessFadeDuration;
+      if (progress > 1.0f) progress = 1.0f;
+
+      int startBrightness = (brightnessDirection == 1) ? 10 : 100;
+      int endBrightness = (brightnessDirection == 1) ? 100 : 10;
+
+      currentBrightness = startBrightness + (endBrightness - startBrightness) * progress;
+    } else {
+      brightnessDirection *= -1; // Change direction
+      brightnessFadeStartTime = currentTime;
+      currentBrightness = (brightnessDirection == 1) ? 10 : 100;
+    }
+  } else {
+    currentBrightness = (brightnessDirection == 1) ? 100 : 10;
+  }
+
+  strip.setBrightness(currentBrightness);
+
+  if (currentTime - growShrinkTimer >= growShrinkInterval) {
+    growShrinkTimer = currentTime;
+    if (growShrinkDirection == 1) { // Grow
+      if (growShrinkIndex < NUM_LEDS - 1) {
+        growShrinkIndex++;
+      } else {
+        growShrinkDirection = -1; // Switch to shrink
+        growShrinkIndex = NUM_LEDS - 1;
+      }
+    } else { // Shrink
+      if (growShrinkIndex >= 0) {
+        growShrinkIndex--;
+      } else {
+        growShrinkDirection = 1; // Switch to grow
+        growShrinkIndex = 0;
+      }
+    }
+  }
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (growShrinkDirection == 1 && i <= growShrinkIndex) {
+      strip.setPixelColor(i, currentColor);
+    } else if (growShrinkDirection == -1 && i < NUM_LEDS - (NUM_LEDS -1 - growShrinkIndex)) {
+      strip.setPixelColor(i, currentColor);
+    } else {
+      strip.setPixelColor(i, 0);
+    }
+  }
+
+  strip.show();
+}
