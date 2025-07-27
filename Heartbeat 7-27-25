@@ -1,0 +1,254 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN 4
+#define LED_COUNT 144
+#define SCAN_TIME 60
+#define RETRY_DELAY 15000 // Changed to 15 seconds (15000 milliseconds)
+#define PULSE_FADE_IN_DURATION 20   // Quick fade-in (first pulse)
+#define PULSE_FADE_OUT_DURATION 40  // Slow fade-out (first pulse)
+#define PULSE_HOLD_DURATION 60      // Duration at full brightness (first pulse)
+#define PULSE_DELAY 40              // Delay between pulses
+#define PULSE_FADE_IN_DURATION_2 20 // Quick fade-in (second pulse)
+#define PULSE_FADE_OUT_DURATION_2 60 // Slow fade-out (second pulse)
+#define PULSE_HOLD_DURATION_2 60    // Duration at full brightness (second pulse)
+#define BRIGHTNESS_PERCENT 0.25     // 25% brightness
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+static BLEUUID serviceUUID("180D"); // Heart Rate Service UUID
+static BLEUUID charUUID("2A37");    // Heart Rate Measurement Characteristic UUID
+
+static boolean doConnect = false;
+static boolean connected = false;
+static boolean doScan = true;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLERemoteService* pRemoteService;
+static BLEAddress* pServerAddress = nullptr; // Initialize to nullptr
+
+unsigned long lastHeartbeatTime = 0;
+int currentHeartRate = 0;
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    connected = true;
+    doScan = false; // Stop scanning when connected
+    Serial.println("Client Connected");
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    connected = false;
+    doScan = true; // Restart scan on disconnect
+    Serial.println("Client Disconnected");
+    if (pServerAddress != nullptr) {
+      delete pServerAddress;
+      pServerAddress = nullptr;
+    }
+  }
+};
+
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  if (length > 1) {
+    currentHeartRate = pData[1];
+    Serial.print("Heart Rate: ");
+    Serial.println(currentHeartRate);
+    lastHeartbeatTime = millis();
+    pulseLEDs();
+  } else {
+    Serial.println("Error: Heart rate data length is invalid.");
+  }
+}
+
+int getHeartRateZone(int heartRate) {
+  if (heartRate <= 108) return 1;
+  if (heartRate <= 134) return 2;
+  if (heartRate <= 146) return 3;
+  if (heartRate <= 154) return 4;
+  if (heartRate <= 162) return 5;
+  return 6;
+}
+
+uint32_t getZoneColor(int zone) {
+  switch (zone) {
+    case 1: return strip.Color(75 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 130 * BRIGHTNESS_PERCENT);
+    case 2: return strip.Color(0 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT);
+    case 3: return strip.Color(255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
+    case 4: return strip.Color(255 * BRIGHTNESS_PERCENT, 165 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
+    case 5: return strip.Color(255 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
+    case 6: return strip.Color(255 * BRIGHTNESS_PERCENT, 192 * BRIGHTNESS_PERCENT, 203 * BRIGHTNESS_PERCENT);
+    default: return strip.Color(0, 0, 0);
+  }
+}
+
+void fadeLEDs(uint32_t color, int fadeDuration, bool fadeIn) {
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+
+  int steps = 20; // Number of fade steps
+  float stepDelay = (float)fadeDuration / steps;
+
+  for (int step = 0; step <= steps; step++) {
+    float brightness = fadeIn ? (float)step / steps : 1.0 - (float)step / steps;
+    uint8_t fadedR = r * brightness * BRIGHTNESS_PERCENT;
+    uint8_t fadedG = g * brightness * BRIGHTNESS_PERCENT;
+    uint8_t fadedB = b * brightness * BRIGHTNESS_PERCENT;
+
+    for (int i = 0; i < LED_COUNT; i++) {
+      if ((i + 1) % 3 != 0) {
+        strip.setPixelColor(i, strip.Color(fadedR, fadedG, fadedB));
+      } else {
+        strip.setPixelColor(i, 0, 0, 0);
+      }
+    }
+    strip.show();
+    delay(stepDelay);
+  }
+}
+
+void pulseLEDs() {
+  int zone = getHeartRateZone(currentHeartRate);
+  uint32_t color = getZoneColor(zone);
+
+  fadeLEDs(color, PULSE_FADE_IN_DURATION, true);
+  delay(PULSE_HOLD_DURATION);
+  fadeLEDs(color, PULSE_FADE_OUT_DURATION, false);
+
+  delay(PULSE_DELAY);
+
+  fadeLEDs(color, PULSE_FADE_IN_DURATION_2, true);
+  delay(PULSE_HOLD_DURATION_2);
+  fadeLEDs(color, PULSE_FADE_OUT_DURATION_2, false);
+}
+
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("BLE Advertised Device found: ");
+    Serial.println(advertisedDevice.toString().c_str());
+    Serial.print("RSSI: ");
+    Serial.println(advertisedDevice.getRSSI());
+
+    if (advertisedDevice.isAdvertisingService(serviceUUID)) {
+      Serial.print("Heart Rate Device found. address: ");
+      Serial.println(advertisedDevice.getAddress().toString().c_str());
+      advertisedDevice.getScan()->stop();
+      if(pServerAddress != nullptr){
+        delete pServerAddress;
+      }
+      pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+      doConnect = true;
+      doScan = false; // Stop scanning once device is found and connection is imminent
+    }
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.show();
+  BLEDevice::init("ESP32_HR_LED");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(SCAN_TIME);
+}
+
+void scanBlink() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    if ((i + 1) % 3 != 0) {
+      strip.setPixelColor(i, strip.Color(0, 255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT));
+    } else {
+      strip.setPixelColor(i, strip.Color(0, 0, 0));
+    }
+  }
+  strip.show();
+  delay(100);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, strip.Color(0, 0, 0));
+  }
+  strip.show();
+}
+
+void loop() {
+  unsigned long lastScanBlink = 0;
+  const long scanBlinkInterval = 500;
+
+  if (doConnect) {
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    Serial.println("Attempting to connect...");
+    delay(200);
+
+    if (pClient->connect(*pServerAddress)) {
+      Serial.println("Connected to server");
+      delay(200);
+
+      if (pClient->isConnected()) {
+        Serial.println("Client is connected.");
+        pRemoteService = pClient->getService(serviceUUID);
+
+        if (pRemoteService) {
+          Serial.println("Service found");
+          pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+
+          if (pRemoteCharacteristic) {
+            Serial.println("Characteristic found");
+
+            if (pRemoteCharacteristic->canNotify()) {
+              Serial.println("Characteristic can notify");
+              pRemoteCharacteristic->registerForNotify(notifyCallback);
+              connected = true;
+              doConnect = false; // Connection established, no need to connect anymore
+            } else {
+              Serial.println("Error: Characteristic cannot notify");
+              pClient->disconnect();
+              doConnect = false;
+            }
+          } else {
+            Serial.println("Error: Characteristic not found");
+            pClient->disconnect();
+            doConnect = false;
+          }
+        } else {
+          Serial.println("Error: Service not found");
+          pClient->disconnect();
+          doConnect = false;
+        }
+      } else {
+        Serial.println("Error: Client is not connected after connect function");
+        pClient->disconnect();
+        doConnect = false;
+      }
+    } else {
+      Serial.println("Error: Failed to connect to server");
+      doConnect = false; // Connection failed
+    }
+
+    // This block handles cases where connection failed or was lost
+    if (!connected) { // If we're not connected after the above attempts
+      Serial.println("Connection failed or lost. Restarting scan after delay...");
+      delay(RETRY_DELAY); // Wait for 15 seconds
+      BLEDevice::getScan()->start(SCAN_TIME); // Restart the scan
+      doScan = true; // Crucial: set doScan to true to re-enable scanning logic
+    }
+  }
+
+  // Handle LED behavior based on connection and scan state
+  if (connected) {
+    // Heart rate is already printed and pulseLEDs called in notifyCallback
+    // No continuous LED animation here when connected and not actively pulsing.
+    // The previous code had a 'setAllLedsDim()' in the other version here.
+    // For this version, LEDs will be off unless pulsing.
+  } else if (doScan) { // Only blink when actively scanning and not connected
+    if (millis() - lastScanBlink >= scanBlinkInterval) {
+      scanBlink();
+      lastScanBlink = millis();
+    }
+  }
+
+  delay(10);
+}
