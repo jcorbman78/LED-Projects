@@ -6,8 +6,10 @@
 
 #define LED_PIN 4
 #define LED_COUNT 144
-#define SCAN_TIME 60
-#define RETRY_DELAY 15000 // Changed to 15 seconds (15000 milliseconds)
+#define SCAN_TIME 60 // Scan for 60 seconds
+#define RETRY_DELAY 15000 // 15 seconds delay before restarting scan/connection attempt
+#define CONNECTION_TIMEOUT_MS 30000 // Max time to wait for connection attempt before giving up and restarting scan
+
 #define PULSE_FADE_IN_DURATION 20   // Quick fade-in (first pulse)
 #define PULSE_FADE_OUT_DURATION 40  // Slow fade-out (first pulse)
 #define PULSE_HOLD_DURATION 60      // Duration at full brightness (first pulse)
@@ -24,29 +26,39 @@ static BLEUUID charUUID("2A37");    // Heart Rate Measurement Characteristic UUI
 
 static boolean doConnect = false;
 static boolean connected = false;
-static boolean doScan = true;
+static boolean doScan = true; // Start in scanning state
 static BLERemoteCharacteristic* pRemoteCharacteristic;
 static BLERemoteService* pRemoteService;
 static BLEAddress* pServerAddress = nullptr; // Initialize to nullptr
+static BLEClient* pClient = nullptr; // Global BLEClient pointer for proper cleanup
 
 unsigned long lastHeartbeatTime = 0;
 int currentHeartRate = 0;
+unsigned long lastAttemptTime = 0; // To track last connection/scan attempt time
+
+// Forward declaration
+void startBLEScan();
 
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient* pclient) {
     connected = true;
     doScan = false; // Stop scanning when connected
     Serial.println("Client Connected");
+    lastAttemptTime = millis(); // Reset attempt time on successful connection
   }
 
   void onDisconnect(BLEClient* pclient) {
     connected = false;
-    doScan = true; // Restart scan on disconnect
     Serial.println("Client Disconnected");
     if (pServerAddress != nullptr) {
       delete pServerAddress;
       pServerAddress = nullptr;
     }
+    // Set doConnect to false to ensure a new scan/connection process starts
+    doConnect = false;
+    // Set doScan to true to explicitly signal to start scanning in loop
+    doScan = true;
+    lastAttemptTime = millis(); // Reset attempt time on disconnect
   }
 };
 
@@ -77,7 +89,7 @@ uint32_t getZoneColor(int zone) {
     case 2: return strip.Color(0 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT);
     case 3: return strip.Color(255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
     case 4: return strip.Color(255 * BRIGHTNESS_PERCENT, 165 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
-    case 5: return strip.Color(255 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT);
+    case 5: return strip.Color(255 * BRIGHTNESS_PERCENT, 0 * BRIGHTNESS_PERCENT, 0 * BRBRIGHTNESS_PERCENT);
     case 6: return strip.Color(255 * BRIGHTNESS_PERCENT, 192 * BRIGHTNESS_PERCENT, 203 * BRIGHTNESS_PERCENT);
     default: return strip.Color(0, 0, 0);
   }
@@ -93,12 +105,12 @@ void fadeLEDs(uint32_t color, int fadeDuration, bool fadeIn) {
 
   for (int step = 0; step <= steps; step++) {
     float brightness = fadeIn ? (float)step / steps : 1.0 - (float)step / steps;
-    uint8_t fadedR = r * brightness * BRIGHTNESS_PERCENT;
-    uint8_t fadedG = g * brightness * BRIGHTNESS_PERCENT;
-    uint8_t fadedB = b * brightness * BRIGHTNESS_PERCENT;
+    uint8_t fadedR = r * brightness; // BRIGHTNESS_PERCENT already applied in getZoneColor
+    uint8_t fadedG = g * brightness;
+    uint8_t fadedB = b * brightness;
 
     for (int i = 0; i < LED_COUNT; i++) {
-      if ((i + 1) % 3 != 0) {
+      if ((i + 1) % 3 != 0) { // Assuming every 3rd LED is off as per original code
         strip.setPixelColor(i, strip.Color(fadedR, fadedG, fadedB));
       } else {
         strip.setPixelColor(i, 0, 0, 0);
@@ -134,59 +146,87 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     if (advertisedDevice.isAdvertisingService(serviceUUID)) {
       Serial.print("Heart Rate Device found. address: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
-      advertisedDevice.getScan()->stop();
-      if(pServerAddress != nullptr){
+
+      // Stop current scan immediately
+      BLEDevice::getScan()->stop();
+
+      if (pServerAddress != nullptr) {
         delete pServerAddress;
+        pServerAddress = nullptr;
       }
       pServerAddress = new BLEAddress(advertisedDevice.getAddress());
-      doConnect = true;
-      doScan = false; // Stop scanning once device is found and connection is imminent
+      doConnect = true; // Signal to attempt connection
+      doScan = false;   // Stop active scanning until connection status is known
     }
   }
 };
+
+void startBLEScan() {
+  Serial.println("Starting BLE scan...");
+  BLEScan* pBLEScan = BLEDevice::getScan(); // Get the BLEScan object
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks()); // Re-set callback, although usually only needed once
+  pBLEScan->setActiveScan(true); // Active scan uses more power but gets more info
+  pBLEScan->start(SCAN_TIME, false); // Start the scan for SCAN_TIME, false means don't wait for completion
+  lastAttemptTime = millis(); // Record when the scan started
+  Serial.println("Scan started.");
+}
+
 
 void setup() {
   Serial.begin(115200);
   strip.begin();
   strip.show();
   BLEDevice::init("ESP32_HR_LED");
-  BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setActiveScan(true);
-  pBLEScan->start(SCAN_TIME);
+
+  // Initial scan start
+  startBLEScan();
 }
 
 void scanBlink() {
+  // Only blink a few LEDs for scan indication to save power on large strips
+  static int currentLED = 0;
   for (int i = 0; i < LED_COUNT; i++) {
-    if ((i + 1) % 3 != 0) {
-      strip.setPixelColor(i, strip.Color(0, 255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT));
-    } else {
-      strip.setPixelColor(i, strip.Color(0, 0, 0));
-    }
+    strip.setPixelColor(i, strip.Color(0, 0, 0)); // Turn all off first
   }
+
+  // Blink a single segment of 2 LEDs
+  if ((currentLED + 1) % 3 != 0) { // Keep original logic of skipping every 3rd
+    strip.setPixelColor(currentLED, strip.Color(0, 255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT)); // Cyan
+  }
+  if ((currentLED + 1 + 1) % 3 != 0) {
+    strip.setPixelColor(currentLED + 1, strip.Color(0, 255 * BRIGHTNESS_PERCENT, 255 * BRIGHTNESS_PERCENT)); // Cyan
+  }
+
   strip.show();
   delay(100);
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, strip.Color(0, 0, 0));
-  }
+  strip.setPixelColor(currentLED, 0, 0, 0); // Turn off the blinked LEDs
+  strip.setPixelColor(currentLED + 1, 0, 0, 0);
   strip.show();
+
+  currentLED = (currentLED + 2) % LED_COUNT; // Move to next position
 }
 
+
 void loop() {
-  unsigned long lastScanBlink = 0;
+  unsigned long currentTime = millis();
+  static unsigned long lastScanBlink = 0;
   const long scanBlinkInterval = 500;
 
   if (doConnect) {
-    BLEClient* pClient = BLEDevice::createClient();
-    pClient->setClientCallbacks(new MyClientCallback());
+    if (pClient == nullptr) { // Create client only if not already created
+      pClient = BLEDevice::createClient();
+      pClient->setClientCallbacks(new MyClientCallback());
+    }
 
     Serial.println("Attempting to connect...");
-    delay(200);
+    delay(200); // Small delay to allow serial to catch up
 
-    if (pClient->connect(*pServerAddress)) {
+    // Attempt connection
+    if (pServerAddress != nullptr && pClient->connect(*pServerAddress)) {
       Serial.println("Connected to server");
-      delay(200);
+      delay(200); // Small delay after connection
 
+      // Check if client is truly connected (redundant but safe)
       if (pClient->isConnected()) {
         Serial.println("Client is connected.");
         pRemoteService = pClient->getService(serviceUUID);
@@ -202,53 +242,83 @@ void loop() {
               Serial.println("Characteristic can notify");
               pRemoteCharacteristic->registerForNotify(notifyCallback);
               connected = true;
-              doConnect = false; // Connection established, no need to connect anymore
+              doConnect = false; // Connection established, no longer attempting to connect
+              Serial.println("Notifications registered. Ready for data.");
             } else {
-              Serial.println("Error: Characteristic cannot notify");
+              Serial.println("Error: Characteristic cannot notify. Disconnecting.");
               pClient->disconnect();
-              doConnect = false;
+              // No need to set doScan=true here, onDisconnect handles it.
             }
           } else {
-            Serial.println("Error: Characteristic not found");
+            Serial.println("Error: Characteristic not found. Disconnecting.");
             pClient->disconnect();
-            doConnect = false;
           }
         } else {
-          Serial.println("Error: Service not found");
+          Serial.println("Error: Service not found. Disconnecting.");
           pClient->disconnect();
-          doConnect = false;
         }
       } else {
-        Serial.println("Error: Client is not connected after connect function");
+        Serial.println("Error: Client is not connected after connect function. Disconnecting.");
         pClient->disconnect();
-        doConnect = false;
       }
     } else {
-      Serial.println("Error: Failed to connect to server");
-      doConnect = false; // Connection failed
-    }
-
-    // This block handles cases where connection failed or was lost
-    if (!connected) { // If we're not connected after the above attempts
-      Serial.println("Connection failed or lost. Restarting scan after delay...");
-      delay(RETRY_DELAY); // Wait for 15 seconds
-      BLEDevice::getScan()->start(SCAN_TIME); // Restart the scan
-      doScan = true; // Crucial: set doScan to true to re-enable scanning logic
-    }
-  }
-
-  // Handle LED behavior based on connection and scan state
-  if (connected) {
-    // Heart rate is already printed and pulseLEDs called in notifyCallback
-    // No continuous LED animation here when connected and not actively pulsing.
-    // The previous code had a 'setAllLedsDim()' in the other version here.
-    // For this version, LEDs will be off unless pulsing.
-  } else if (doScan) { // Only blink when actively scanning and not connected
-    if (millis() - lastScanBlink >= scanBlinkInterval) {
-      scanBlink();
-      lastScanBlink = millis();
+      Serial.println("Error: Failed to connect to server.");
+      // If connection fails, ensure we cleanup the address and restart scan logic
+      if (pServerAddress != nullptr) {
+        delete pServerAddress;
+        pServerAddress = nullptr;
+      }
+      // Force a restart of the scan process after delay
+      doConnect = false; // Stop trying to connect to this address
+      doScan = true;     // Signal to start scanning
+      lastAttemptTime = millis(); // Reset attempt timer for next scan/connect cycle
     }
   }
 
-  delay(10);
+  // Logic to handle scanning or re-scanning
+  if (!connected) { // If not connected, manage scanning or re-connection attempts
+    if (doScan) {
+      // Check if enough time has passed since the last scan/connection attempt
+      if (currentTime - lastAttemptTime >= RETRY_DELAY) {
+        Serial.println("Retry delay elapsed. Initiating scan.");
+        startBLEScan(); // Re-initiate scan
+        // doScan remains true, waiting for a device to be found by the scan
+      }
+      // Blink LEDs only when actively scanning or waiting for scan results
+      if (currentTime - lastScanBlink >= scanBlinkInterval) {
+        scanBlink();
+        lastScanBlink = currentTime;
+      }
+    } else if (doConnect && (currentTime - lastAttemptTime >= CONNECTION_TIMEOUT_MS)) {
+      // If doConnect is true but connection takes too long, force a restart
+      Serial.println("Connection attempt timed out. Forcing rescan.");
+      if (pClient != nullptr) {
+        pClient->disconnect(); // Force disconnect if stuck
+      }
+      if (pServerAddress != nullptr) {
+        delete pServerAddress;
+        pServerAddress = nullptr;
+      }
+      doConnect = false;
+      doScan = true;
+      lastAttemptTime = millis(); // Reset time for next scan
+    }
+  } else {
+    // If connected, ensure LEDs are off if not pulsing, or handle continuous display
+    // You might want a `setAllLedsDim(0)` here or a simple `strip.show()` with all LEDs off
+    // if no pulse is active, to ensure they don't stay on from a previous scanBlink.
+    // However, since pulseLEDs handles turning them off, this might not be strictly necessary
+    // unless you have other continuous display logic.
+  }
+
+  // Optional: Timeout for heartbeat
+  // if (connected && (currentTime - lastHeartbeatTime > (RETRY_DELAY * 2))) { // If no heartbeat for extended period
+  //   Serial.println("No heartbeat received for a while. Disconnecting to re-establish.");
+  //   if (pClient != nullptr) {
+  //     pClient->disconnect(); // Force disconnect
+  //   }
+  //   // onDisconnect will handle setting doScan = true and doConnect = false
+  // }
+
+  delay(10); // Small delay for stable loop operation
 }
