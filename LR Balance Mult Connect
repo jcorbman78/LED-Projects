@@ -1,31 +1,51 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
 #include <FastLED.h>
 
 // --- 1. HARDWARE SETTINGS ---
-#define LED_PIN     4          
-#define NUM_LEDS    144        
-#define BRIGHTNESS  100        
+#define LED_PIN     4
+#define NUM_LEDS    144
+#define BRIGHTNESS  100
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
 CRGB leds[NUM_LEDS];
 
-// --- 2. YOUR PEDAL ADDRESS ---
-static BLEAddress pedalAddress("e8:83:38:c5:03:c0"); 
+// --- 2. TIMING & FLAGS (From your Heartbeat script) ---
+#define SCAN_TIME 60
+#define RETRY_DELAY 5000 // 5 second delay before re-scanning
+
+static BLEAddress pedalAddress("e8:83:38:c5:03:c0");
 static BLEUUID serviceUUID("1818"); 
 static BLEUUID charUUID("2A63");    
 
-// --- 3. VARIABLES ---
 static boolean doConnect = false;
 static boolean connected = false;
-static BLEAdvertisedDevice* myDevice;
+static boolean doScan = true;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLEAddress* pServerAddress = nullptr;
 
+// --- 3. DATA VARIABLES ---
 int totalPower = 0;
 float leftPercent = 50.0;
-float smoothedPos = 72.0; 
+float smoothedPos = 72.0;
 
-// --- 4. DATA FROM PEDALS ---
+// --- 4. CALLBACKS (From Heartbeat script) ---
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    connected = true;
+    doScan = false;
+    Serial.println("Connected to Assioma");
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    connected = false;
+    doScan = true;
+    Serial.println("Disconnected from Assioma");
+  }
+};
+
 static void notifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
   if (length >= 4) {
     totalPower = pData[2] | (pData[3] << 8);
@@ -35,21 +55,20 @@ static void notifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, size_
   }
 }
 
-// --- 5. SEARCH LOGIC ---
-class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     if (advertisedDevice.getAddress().equals(pedalAddress)) {
-      BLEDevice::getScan()->stop();
-      myDevice = new BLEAdvertisedDevice(advertisedDevice);
+      advertisedDevice.getScan()->stop();
+      pServerAddress = new BLEAddress(advertisedDevice.getAddress());
       doConnect = true;
+      doScan = false;
     }
   }
 };
 
-// --- 6. LED VISUALS ---
+// --- 5. LED VISUAL LOGIC ---
 void updateLEDs() {
   FastLED.clear();
-
   int middle = NUM_LEDS / 2;
   leds[middle-1] = leds[middle] = leds[middle+1] = CRGB(0, 0, 30); 
 
@@ -66,17 +85,16 @@ void updateLEDs() {
   float diff = abs(50.0 - leftPercent);
   
   CRGB color;
-  if (diff <= 1.0)    color = CRGB::Blue;   
-  else if (diff <= 3) color = CRGB::Green;  
-  else if (diff <= 5) color = CRGB::Yellow; 
-  else if (diff <= 7) color = CRGB::Orange; 
-  else                color = CRGB::Red;    
+  if (diff <= 1.0)      color = CRGB::Blue;   
+  else if (diff <= 2.5) color = CRGB::Green;  
+  else if (diff <= 4.5) color = CRGB::Yellow; 
+  else                  color = CRGB::Red;    
 
-  // Corrected Direction: 40% Left -> Left Edge | 60% Left -> Right Edge
-  float targetPos = map(leftPercent * 10.0, 400.0, 600.0, (windowSize/2), NUM_LEDS - (windowSize/2));
+  // Direction: Higher Left% = Lower LED Index (Moved to the left)
+  float targetPos = map(leftPercent * 10.0, 600.0, 400.0, (windowSize/2), NUM_LEDS - (windowSize/2));
   targetPos = constrain(targetPos, (windowSize/2), NUM_LEDS - (windowSize/2));
 
-  smoothedPos = smoothedPos + (targetPos - smoothedPos) * 0.18;
+  smoothedPos = smoothedPos + (targetPos - smoothedPos) * 0.12;
 
   int startIdx = (int)smoothedPos - (windowSize / 2);
   for(int i = 0; i < windowSize; i++) {
@@ -87,34 +105,13 @@ void updateLEDs() {
   }
 }
 
-// --- 7. CONNECTION TOOLS ---
-bool connectToServer() {
-    BLEClient* pClient = BLEDevice::createClient();
-    if (!pClient->connect(myDevice)) return false; 
-
-    // --- NON-AGGRESSIVE UPDATE ---
-    // This tells the pedal to only send data every 50-75ms.
-    // This leaves "room" for the Phone and PC to talk to the pedal too.
-    pClient->updateConnParams(myDevice->getAddress().getNative(), 40, 60, 0, 400);
-
-    BLERemoteService* pSvc = pClient->getService(serviceUUID);
-    if (pSvc == nullptr) { pClient->disconnect(); return false; }
-    BLERemoteCharacteristic* pChr = pSvc->getCharacteristic(charUUID);
-    if (pChr == nullptr) { pClient->disconnect(); return false; }
-    if (pChr->canNotify()) {
-        pChr->registerForNotify(notifyCallback);
-        connected = true;
-        return true;
-    }
-    return false;
-}
-
-// --- 8. INITIAL SETUP ---
+// --- 6. INITIAL SETUP ---
 void setup() {
   Serial.begin(115200);
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
   
+  // Rainbow Startup
   for(int i = 0; i < NUM_LEDS; i++) {
     leds[i] = CHSV(i * 2, 255, 100);
     FastLED.show();
@@ -126,33 +123,45 @@ void setup() {
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(0, false); 
+  pBLEScan->start(SCAN_TIME);
 }
 
-// --- 9. MAIN LOOP ---
+// --- 7. MAIN LOOP (From Heartbeat script structure) ---
 void loop() {
   if (doConnect) {
-    // Double flash orange indicator
-    for(int f = 0; f < 2; f++) {
-      fill_solid(leds, NUM_LEDS, CRGB::Orange); FastLED.show(); delay(100);
-      fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); delay(100);
+    BLEClient* pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    if (pClient->connect(*pServerAddress)) {
+      BLERemoteService* pSvc = pClient->getService(serviceUUID);
+      if (pSvc != nullptr) {
+        pRemoteCharacteristic = pSvc->getCharacteristic(charUUID);
+        if (pRemoteCharacteristic != nullptr && pRemoteCharacteristic->canNotify()) {
+          pRemoteCharacteristic->registerForNotify(notifyCallback);
+          // Connected state is handled by the Callback
+        }
+      }
+    } else {
+      doConnect = false;
     }
 
-    if (!connectToServer()) {
-      Serial.println("Connection failed. Waiting 5 seconds before re-scanning...");
-      // --- THE 5 SECOND RETRY DELAY ---
-      delay(5000); 
-      BLEDevice::getScan()->start(0, false);
+    if (!connected) {
+      Serial.println("Connection failed. Waiting delay...");
+      delay(RETRY_DELAY);
+      BLEDevice::getScan()->start(SCAN_TIME);
+      doScan = true;
     }
     doConnect = false;
   }
-  
+
   if (connected) {
     updateLEDs();
-  } else {
+  } else if (doScan) {
+    // Pulse Blue while searching (The Heartbeat "ScanBlink" equivalent)
     uint8_t b = beatsin8(30, 20, 160);
     leds[0] = leds[1] = leds[2] = CRGB(0, 0, b);
   }
+  
   FastLED.show();
   delay(20); 
 }
