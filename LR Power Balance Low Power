@@ -1,0 +1,108 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <FastLED.h>
+
+// --- 1. SETTINGS ---
+#define LED_PIN     4
+#define NUM_LEDS    144
+CRGB leds[NUM_LEDS];
+
+static BLEAddress pedalAddress("e8:83:38:c5:03:c0");
+static BLEUUID serviceUUID("1818"); 
+static BLEUUID charUUID("2A63");    
+
+float leftPercent = 50.0;
+float smoothedPos = 72.0;
+bool connected = false;
+BLEClient* pClient = nullptr;
+
+// --- 2. DISCONNECT HANDLER ---
+// This ensures that if the pedal drops, the ESP32 knows to look for it again
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+    connected = true;
+  }
+  void onDisconnect(BLEClient* pclient) {
+    connected = false;
+    Serial.println("Disconnected! Searching...");
+  }
+};
+
+// --- 3. DATA CALLBACK (Instant Push) ---
+static void notifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+    if (length >= 5) {
+        leftPercent = pData[4] / 2.0; 
+    }
+}
+
+// --- 4. LED ANIMATION ---
+void updateLEDs() {
+    float targetPos = map(leftPercent * 10.0, 600.0, 400.0, 15, NUM_LEDS - 15);
+    // 0.3 smoothing gives very fast, snappy feedback for training
+    smoothedPos = smoothedPos + (targetPos - smoothedPos) * 0.3;
+
+    FastLED.clear();
+    int middle = NUM_LEDS / 2;
+    leds[middle] = CRGB(0, 0, 50); // Dim center guide
+
+    int startIdx = (int)smoothedPos - 12;
+    for(int i = 0; i < 25; i++) {
+        int idx = startIdx + i;
+        if(idx >= 0 && idx < NUM_LEDS) leds[idx] = CRGB::Blue;
+    }
+    FastLED.show();
+}
+
+// --- 5. CONNECTION LOGIC ---
+bool connectToPedals() {
+    Serial.println("Forming connection...");
+    pClient = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    if (!pClient->connect(pedalAddress)) return false;
+
+    BLERemoteService* pSvc = pClient->getService(serviceUUID);
+    if (!pSvc) return false;
+
+    BLERemoteCharacteristic* pChr = pSvc->getCharacteristic(charUUID);
+    if (!pChr) return false;
+
+    if (pChr->canNotify()) {
+        pChr->registerForNotify(notifyCallback);
+        return true;
+    }
+    return false;
+}
+
+// --- 6. SETUP ---
+void setup() {
+    Serial.begin(115200);
+    setCpuFrequencyMhz(80); // Save ESP32 power
+    
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(100);
+    
+    BLEDevice::init("ESP32_Balance_Fast");
+}
+
+// --- 7. THE MAIN LOOP ---
+void loop() {
+    if (!connected) {
+        if (connectToPedals()) {
+            connected = true;
+            Serial.println("Connected and Notifying!");
+        } else {
+            // Pulse Red while searching
+            fill_solid(leds, 3, CRGB(20, 0, 0)); 
+            FastLED.show();
+            delay(2000); 
+        }
+    }
+
+    if (connected) {
+        updateLEDs();
+    }
+    
+    delay(10); // Maintain high refresh rate
+}
